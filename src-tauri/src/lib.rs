@@ -268,6 +268,7 @@ pub async fn run() {
             get_file_size,
             get_avatar_cache_dir,
             read_dir_recursive,
+            list_cover_images,
             upload_cover,
             download_cover,
             get_archive_pre,

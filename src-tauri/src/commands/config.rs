@@ -57,16 +57,19 @@ pub async fn save_global_config(
     auto_start: bool,
     auto_upload: bool,
     log_level: String,
+    cover_match_path: String,
 ) -> Result<bool, AppError> {
     let app_data = app.state::<AppData>();
 
     info!("全局配置已保存");
 
-    app_data
-        .config
-        .lock()
-        .await
-        .save_global_config(max_curr, auto_start, auto_upload, log_level);
+    app_data.config.lock().await.save_global_config(
+        max_curr,
+        auto_start,
+        auto_upload,
+        log_level,
+        cover_match_path,
+    );
 
     app_data.upload_service.set_max_concurrent(max_curr).await;
     Ok(true)

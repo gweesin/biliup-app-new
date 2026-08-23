@@ -77,6 +77,7 @@ interface ConfigRoot {
     auto_upload: boolean
     auto_start: boolean
     log_level: string
+    cover_match_path: string
     config: Record<number, UserConfig> // uid -> 用户配置
 }
 
@@ -369,6 +370,7 @@ export const useUserConfigStore = defineStore('userConfig', () => {
                 auto_start: true,
                 auto_upload: true,
                 log_level: 'info',
+                cover_match_path: '',
                 config: {}
             }
         }
@@ -655,7 +657,12 @@ export const useUserConfigStore = defineStore('userConfig', () => {
     }
 
     const updateGlobalConfig = async (
-        updates: Partial<Pick<ConfigRoot, 'max_curr' | 'auto_upload' | 'auto_start' | 'log_level'>>
+        updates: Partial<
+            Pick<
+                ConfigRoot,
+                'max_curr' | 'auto_upload' | 'auto_start' | 'log_level' | 'cover_match_path'
+            >
+        >
     ) => {
         if (!configRoot.value) {
             throw new Error('配置未加载')
@@ -669,7 +676,8 @@ export const useUserConfigStore = defineStore('userConfig', () => {
                 maxCurr: configRoot.value.max_curr,
                 autoStart: configRoot.value.auto_start,
                 autoUpload: configRoot.value.auto_upload,
-                logLevel: configRoot.value.log_level
+                logLevel: configRoot.value.log_level,
+                coverMatchPath: configRoot.value.cover_match_path || ''
             })
             // 保存配置
             await saveConfig()

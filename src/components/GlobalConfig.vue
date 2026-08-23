@@ -63,6 +63,27 @@
                 </div>
             </el-form-item>
 
+            <!-- 封面匹配路径 -->
+            <el-form-item label="封面匹配路径">
+                <div class="cover-match-path-container">
+                    <el-input
+                        v-model="configForm.cover_match_path"
+                        placeholder="请选择存放封面图片的文件夹，或直接输入路径"
+                        clearable
+                    >
+                        <template #append>
+                            <el-button @click="handleSelectCoverMatchPath">
+                                <el-icon><FolderOpened /></el-icon>
+                                <span style="margin-left: 4px">选择文件夹</span>
+                            </el-button>
+                        </template>
+                    </el-input>
+                </div>
+                <div class="form-tip">
+                    根据稿件标题中的关键字自动匹配该文件夹下的图片作为封面，点击即可设置为封面
+                </div>
+            </el-form-item>
+
             <!-- 用户配置分类标签 -->
             <el-divider content-position="left">
                 <el-text type="primary" size="large">用户配置</el-text>
@@ -222,6 +243,8 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { ElMessageBox } from 'element-plus'
+import { FolderOpened } from '@element-plus/icons-vue'
+import { open } from '@tauri-apps/plugin-dialog'
 import { useUserConfigStore } from '../stores/user_config'
 import { useAuthStore } from '../stores/auth'
 import { useUtilsStore } from '../stores/utils'
@@ -232,6 +255,7 @@ interface GlobalConfigForm {
     auto_upload: boolean
     auto_start: boolean
     log_level: string
+    cover_match_path: string
 }
 
 // Props
@@ -285,7 +309,8 @@ const configForm = ref<GlobalConfigForm>({
     max_curr: 1,
     auto_upload: true,
     auto_start: true,
-    log_level: 'info'
+    log_level: 'info',
+    cover_match_path: ''
 })
 
 // 保存原始配置用于检查变化
@@ -293,7 +318,8 @@ const originalConfig = ref<GlobalConfigForm>({
     max_curr: 1,
     auto_upload: true,
     auto_start: true,
-    log_level: 'info'
+    log_level: 'info',
+    cover_match_path: ''
 })
 
 // 监听 modelValue 变化
@@ -352,7 +378,8 @@ const loadGlobalConfig = async () => {
                 max_curr: config.max_curr || 2,
                 auto_upload: config.auto_upload ?? true,
                 auto_start: config.auto_start ?? true,
-                log_level: config.log_level || 'info'
+                log_level: config.log_level || 'info',
+                cover_match_path: config.cover_match_path || ''
             }
 
             // 保存原始配置
@@ -384,7 +411,8 @@ const handleSave = async () => {
             max_curr: configForm.value.max_curr,
             auto_upload: configForm.value.auto_upload,
             auto_start: configForm.value.auto_start,
-            log_level: configForm.value.log_level
+            log_level: configForm.value.log_level,
+            cover_match_path: configForm.value.cover_match_path.trim()
         })
 
         // 如果选择了用户，保存用户配置
@@ -543,7 +571,8 @@ const handleDialogClose = () => {
         max_curr: 1,
         auto_upload: true,
         auto_start: true,
-        log_level: 'info'
+        log_level: 'info',
+        cover_match_path: ''
     }
     originalConfig.value = { ...configForm.value }
 }
@@ -553,8 +582,27 @@ const hasUnsavedChanges = (): boolean => {
     return (
         configForm.value.max_curr !== originalConfig.value.max_curr ||
         configForm.value.auto_upload !== originalConfig.value.auto_upload ||
-        configForm.value.auto_start !== originalConfig.value.auto_start
+        configForm.value.auto_start !== originalConfig.value.auto_start ||
+        configForm.value.log_level !== originalConfig.value.log_level ||
+        configForm.value.cover_match_path !== originalConfig.value.cover_match_path
     )
+}
+
+// 打开文件夹选择弹窗，选择封面匹配路径
+const handleSelectCoverMatchPath = async () => {
+    try {
+        const selected = await open({
+            title: '选择封面匹配文件夹',
+            directory: true,
+            multiple: false
+        })
+        if (typeof selected === 'string' && selected) {
+            configForm.value.cover_match_path = selected
+        }
+    } catch (error) {
+        console.error('选择封面匹配路径失败:', error)
+        utilsStore.showMessage(`选择文件夹失败: ${error}`, 'error')
+    }
 }
 </script>
 
@@ -569,6 +617,12 @@ const hasUnsavedChanges = (): boolean => {
 .slider-container {
     width: 100%;
     margin-bottom: 10px;
+}
+
+.cover-match-path-container {
+    width: 100%;
+    display: flex;
+    gap: 8px;
 }
 
 .rate-limit-container {

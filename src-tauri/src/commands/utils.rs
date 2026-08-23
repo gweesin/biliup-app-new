@@ -121,6 +121,84 @@ pub async fn read_dir_recursive(
     )
 }
 
+#[derive(serde::Serialize)]
+pub struct CoverImageItem {
+    pub name: String,
+    pub path: String,
+    pub data_url: String,
+}
+
+/// 列出封面匹配路径下文件名包含任一关键字的图片文件（返回 base64 data URL 用于缩略图预览）
+#[tauri::command]
+pub async fn list_cover_images(
+    dir_path: String,
+    keywords: Vec<String>,
+) -> Result<Vec<CoverImageItem>, AppError> {
+    let path = Path::new(&dir_path);
+    if !path.exists() || !path.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let entries =
+        file_utils::read_dir_recursive(path, true, Some(5)).map_err(AppError::Internal)?;
+    let mut result = Vec::new();
+
+    for entry in entries {
+        if entry.is_directory {
+            continue;
+        }
+
+        let ext = Path::new(&entry.name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        if !matches!(
+            ext.as_str(),
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
+        ) {
+            continue;
+        }
+
+        let lower_name = entry.name.to_lowercase();
+        if !keywords
+            .iter()
+            .filter(|kw| !kw.is_empty())
+            .any(|kw| lower_name.contains(&kw.to_lowercase()))
+        {
+            continue;
+        }
+
+        // 跳过超大文件（> 8MB），避免界面卡顿
+        let bytes = match std::fs::read(&entry.path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!("读取封面图片失败 {}: {}", entry.path, e);
+                continue;
+            }
+        };
+        if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+            continue;
+        }
+
+        let mime = match ext.as_str() {
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            _ => "image/jpeg",
+        };
+
+        result.push(CoverImageItem {
+            name: entry.name.clone(),
+            path: entry.path.clone(),
+            data_url: format!("data:{mime};base64,{}", encode_base64(&bytes)),
+        });
+    }
+
+    Ok(result)
+}
+
 /// 上传封面并进行返回url
 #[tauri::command]
 pub async fn upload_cover(

@@ -249,6 +249,40 @@
                                                     <el-icon><Close /></el-icon>
                                                 </el-button>
                                             </div>
+                                            <!-- 标题关键字匹配封面 -->
+                                            <div
+                                                v-if="coverMatchImages.length > 0"
+                                                class="cover-match-list"
+                                            >
+                                                <div class="cover-match-label">
+                                                    匹配到
+                                                    {{
+                                                        coverMatchImages.length
+                                                    }}
+                                                    张封面，点击即可设置：
+                                                </div>
+                                                <div
+                                                    class="cover-match-grid"
+                                                    v-loading="coverMatchLoading"
+                                                >
+                                                    <div
+                                                        v-for="img in coverMatchImages"
+                                                        :key="img.path"
+                                                        class="cover-match-item"
+                                                        :class="{
+                                                            active: selectedMatchPath === img.path
+                                                        }"
+                                                        :title="img.name"
+                                                        @click="setCoverFromMatch(img.path)"
+                                                    >
+                                                        <img
+                                                            :src="img.data_url"
+                                                            :alt="img.name"
+                                                            loading="lazy"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            </div>
                                         </el-form-item>
 
                                         <el-form-item label="视频分区">
@@ -969,6 +1003,7 @@ import {
     QuestionFilled
 } from '@element-plus/icons-vue'
 import { open, save } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 import { copyFile, remove } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { listen } from '@tauri-apps/api/event'
@@ -1019,6 +1054,165 @@ const currentVer = ref<string>('')
 // 封面显示URL
 const coverDisplayUrl = ref<string>('')
 const coverLoading = ref<boolean>(false)
+
+// 封面关键字匹配（三国英雄名称）
+const COVER_MATCH_KEYWORDS = [
+    '甄宓',
+    '荀彧',
+    '曹冲',
+    '司马昭',
+    '乐进',
+    '钟会',
+    '梦郭嘉',
+    '梦许褚',
+    '梦司马昭',
+    '夏侯惇',
+    '曹丕',
+    '夏侯渊',
+    '张辽',
+    '卞玉儿',
+    '典韦',
+    '徐晃',
+    '曹节',
+    '程昱',
+    '曹仁',
+    '曹洪',
+    '李典',
+    '郭嘉',
+    '司马懿',
+    '庞德',
+    '曹彰',
+    '许褚',
+    '曹植',
+    '于禁',
+    '曹操',
+    '张郃',
+    '邓艾',
+    '梦庞德',
+    '梦曹操',
+    '马岱',
+    '马谡',
+    '刘禅',
+    '赵云',
+    '墨子',
+    '梦马超',
+    '梦庞统',
+    '张飞',
+    '黄月英',
+    '关羽',
+    '诸葛亮',
+    '黄忠',
+    '刘备',
+    '徐庶',
+    '蒲元',
+    '马超',
+    '庞统',
+    '赵统',
+    '魏延',
+    '法正',
+    '糜竺',
+    '萝莉',
+    '马云禄',
+    '周仓',
+    '关凤',
+    '马良',
+    '黄舞蝶',
+    '姜维',
+    '关平',
+    '张莺莺',
+    '梦张飞',
+    '梦关羽',
+    '梦刘备',
+    '梦萝莉',
+    '梦姜维',
+    '梦刘禅',
+    '梦祝融',
+    '吕蒙',
+    '步婉',
+    '孙桓',
+    '孙鲁班',
+    '陆逊',
+    '韩当',
+    '梦小乔',
+    '梦甘宁',
+    '梦孙策',
+    '梦凌统',
+    '梦张昭',
+    '梦孙玲珑',
+    '梦辛宪英',
+    '梦孙权',
+    '小乔',
+    '甘宁',
+    '孙策',
+    '孙尚香',
+    '孙坚',
+    '凌统',
+    '周瑜',
+    '程普',
+    '张昭',
+    '张纮',
+    '太史慈',
+    '鲁肃',
+    '大乔',
+    '吴凤熙',
+    '孙玲珑',
+    '黄盖',
+    '灵音',
+    '顾雍',
+    '吕梦茹',
+    '辛宪英',
+    '周泰',
+    '孙权',
+    '梦周瑜',
+    '袁绍',
+    '颜良',
+    '文丑',
+    '华佗',
+    '蔡文姬',
+    '马腾',
+    '文鸯',
+    '孟获',
+    '祝融',
+    '袁术',
+    '潘凤',
+    '布小蛮',
+    '吕轲',
+    '左慈',
+    '王元姬',
+    '水镜先生',
+    '应龙',
+    '左月',
+    '梦刘璋',
+    '吕布',
+    '公孙瓒',
+    '刘璋',
+    '张角',
+    '刘表',
+    '貂蝉',
+    '贾诩',
+    '董卓',
+    '华雄',
+    '高顺',
+    '孔融',
+    '于吉',
+    '张绣',
+    '刘协',
+    '张鲁',
+    '邢道荣',
+    '梦袁绍',
+    '梦蔡文姬'
+]
+
+interface CoverMatchImage {
+    name: string
+    path: string
+    data_url: string
+}
+
+const coverMatchImages = ref<CoverMatchImage[]>([])
+const coverMatchLoading = ref<boolean>(false)
+const selectedMatchPath = ref<string>('')
+let coverMatchTimer: ReturnType<typeof setTimeout> | null = null
 
 // 响应式数据
 const selectedUser = ref<any>(null)
@@ -2000,6 +2194,85 @@ watch(
             coverDisplayUrl.value = ''
             coverLoading.value = false
         }
+    }
+)
+
+// 根据标题匹配封面路径中的图片
+const refreshCoverMatch = async (title: string) => {
+    // 清除旧定时器
+    if (coverMatchTimer) {
+        clearTimeout(coverMatchTimer)
+        coverMatchTimer = null
+    }
+
+    // 没有配置封面匹配路径时清空
+    const coverMatchPath = userConfigStore.configRoot?.cover_match_path || ''
+    if (!title || !coverMatchPath) {
+        coverMatchImages.value = []
+        return
+    }
+
+    // 提取标题中包含的关键字
+    const matchedKeywords = COVER_MATCH_KEYWORDS.filter(keyword => title.includes(keyword))
+    if (matchedKeywords.length === 0) {
+        coverMatchImages.value = []
+        return
+    }
+
+    // 防抖，避免输入过程中频繁调用
+    coverMatchTimer = setTimeout(async () => {
+        coverMatchLoading.value = true
+        try {
+            const images = await invoke<CoverMatchImage[]>('list_cover_images', {
+                dirPath: coverMatchPath,
+                keywords: matchedKeywords
+            })
+            coverMatchImages.value = images || []
+        } catch (error) {
+            console.error('匹配封面失败:', error)
+            coverMatchImages.value = []
+        } finally {
+            coverMatchLoading.value = false
+        }
+    }, 300)
+}
+
+// 点击匹配的封面图片，上传并设置为封面
+const setCoverFromMatch = async (filePath: string) => {
+    if (templateLoading.value) {
+        return
+    }
+    if (!selectedUser.value || !currentTemplate.value || !currentForm.value) {
+        utilsStore.showMessage('请先选择用户和模板', 'warning')
+        return
+    }
+
+    try {
+        coverLoading.value = true
+        templateLoading.value = true
+        const url = await utilsStore.uploadCover(selectedUser.value.uid, filePath)
+        if (url) {
+            selectedMatchPath.value = filePath
+            currentTemplate.value.cover = url
+            currentForm.value.cover = url
+            utilsStore.showMessage('已设置封面', 'success')
+        } else {
+            throw new Error('封面上传失败')
+        }
+    } catch (error) {
+        console.error('设置封面失败: ', error)
+        utilsStore.showMessage(`设置封面失败: ${error}`, 'error')
+    } finally {
+        coverLoading.value = false
+        templateLoading.value = false
+    }
+}
+
+// 监听标题变化，实时匹配封面
+watch(
+    () => currentForm.value?.title,
+    (newTitle: string | undefined) => {
+        refreshCoverMatch(newTitle || '')
     }
 )
 
@@ -4186,6 +4459,58 @@ const checkUpdate = async () => {
     gap: 10px;
 }
 
+.cover-match-list {
+    margin-top: 12px;
+    width: 100%;
+}
+
+.cover-match-label {
+    font-size: 12px;
+    color: #8c939d;
+    margin-bottom: 8px;
+}
+
+.cover-match-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-height: 40px;
+}
+
+.cover-match-item {
+    width: 84px;
+    height: 48px;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+    border: 2px solid transparent;
+    position: relative; /* 让 z-index 生效 */
+    z-index: 1;
+    transition:
+        border-color 0.2s ease,
+        transform 0.2s ease,
+        box-shadow 0.2s ease;
+}
+
+.cover-match-item img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.cover-match-item:hover {
+    transform: scale(4) translateX(25px);
+    border-color: #409eff;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+    z-index: 999; /* 确保悬浮时在最顶层 */
+}
+
+.cover-match-item.active {
+    border-color: #409eff;
+    box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.3);
+}
+
 .cover-uploader {
     position: relative;
     display: inline-block;
@@ -4235,7 +4560,7 @@ const checkUpdate = async () => {
 }
 
 .cover-uploader .cover-image:hover {
-    transform: scale(3) translateX(25px);
+    transform: scale(4) translateX(25px);
     box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
     z-index: 999; /* 确保悬浮时在最顶层 */
     position: relative; /* 确保定位生效 */

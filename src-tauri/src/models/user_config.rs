@@ -181,6 +181,8 @@ pub struct ConfigRoot {
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default)]
+    pub cover_match_path: String,
+    #[serde(default)]
     pub user_order: Vec<u64>,
     #[serde(default)]
     pub config: HashMap<u64, UserConfig>,
@@ -324,15 +326,17 @@ impl ConfigRoot {
         auto_start: bool,
         auto_upload: bool,
         log_level: String,
+        cover_match_path: String,
     ) -> &Self {
         info!(
-            "更新全局配置: max_curr={}, auto_start={}, auto_upload={}, log_level={}",
-            max_curr, auto_start, auto_upload, log_level
+            "更新全局配置: max_curr={}, auto_start={}, auto_upload={}, log_level={}, cover_match_path={}",
+            max_curr, auto_start, auto_upload, log_level, cover_match_path
         );
         self.max_curr = max_curr;
         self.auto_start = auto_start;
         self.auto_upload = auto_upload;
         self.log_level = log_level;
+        self.cover_match_path = cover_match_path;
 
         self
     }
@@ -453,6 +457,7 @@ impl Default for ConfigRoot {
             auto_start: true,
             auto_upload: true,
             log_level: default_log_level(),
+            cover_match_path: String::new(),
             user_order: Vec::new(),
             config: HashMap::new(),
         }
