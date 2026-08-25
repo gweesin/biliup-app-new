@@ -1614,6 +1614,11 @@ const processSeparateSubmitQueue = async (templateKey: string) => {
         singleTemplate.aid = undefined
         singleTemplate.videos = [singleVideo]
         singleTemplate.title = (singleVideo.title || '').trim() || fallbackTitle
+
+        // 如果视频有封面，则使用视频封面，否则使用模板封面
+        if(singleVideo.cover) {
+            singleTemplate.cover = singleVideo.cover
+        }
         const cancelKey = getSeparateSubmitCancelKey(uid, templateName)
 
         try {
