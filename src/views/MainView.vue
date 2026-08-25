@@ -216,73 +216,12 @@
                                         </el-form-item>
 
                                         <el-form-item label="封面">
-                                            <div class="cover-uploader-row">
-                                                <div
-                                                    class="cover-uploader"
-                                                    action="#"
-                                                    @click="handleCoverSelection"
-                                                    v-loading="coverLoading"
-                                                    :class="{ disabled: templateLoading }"
-                                                >
-                                                    <img
-                                                        v-if="coverDisplayUrl && !coverLoading"
-                                                        :src="coverDisplayUrl"
-                                                        class="cover-image"
-                                                    />
-                                                    <el-icon
-                                                        v-else-if="!coverLoading"
-                                                        class="cover-uploader-icon"
-                                                    >
-                                                        <plus />
-                                                    </el-icon>
-                                                </div>
-
-                                                <el-button
-                                                    v-if="coverDisplayUrl && !coverLoading"
-                                                    class="cover-clear-btn-side"
-                                                    type="danger"
-                                                    size="small"
-                                                    @click.stop="clearCurrentCover"
-                                                    :disabled="templateLoading"
-                                                    title="清除封面"
-                                                >
-                                                    <el-icon><Close /></el-icon>
-                                                </el-button>
-                                            </div>
-                                            <!-- 标题关键字匹配封面 -->
-                                            <div
-                                                v-if="coverMatchImages.length > 0"
-                                                class="cover-match-list"
-                                            >
-                                                <div class="cover-match-label">
-                                                    匹配到
-                                                    {{
-                                                        coverMatchImages.length
-                                                    }}
-                                                    张封面，点击即可设置：
-                                                </div>
-                                                <div
-                                                    class="cover-match-grid"
-                                                    v-loading="coverMatchLoading"
-                                                >
-                                                    <div
-                                                        v-for="img in coverMatchImages"
-                                                        :key="img.path"
-                                                        class="cover-match-item"
-                                                        :class="{
-                                                            active: selectedMatchPath === img.path
-                                                        }"
-                                                        :title="img.name"
-                                                        @click="setCoverFromMatch(img.path)"
-                                                    >
-                                                        <img
-                                                            :src="img.data_url"
-                                                            :alt="img.name"
-                                                            loading="lazy"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            </div>
+                                            <CoverUploader
+                                                v-model="currentForm.cover"
+                                                :title="currentForm.title"
+                                                :uid="selectedUser.uid"
+                                                :disabled="templateLoading"
+                                            />
                                         </el-form-item>
 
                                         <el-form-item label="视频分区">
@@ -992,18 +931,15 @@ import { useUploadStore } from '../stores/upload'
 import { ElMessageBox } from 'element-plus'
 import {
     ArrowDown,
-    Plus,
     UploadFilled,
     Check,
     Edit,
     Setting,
     Refresh,
     Delete,
-    Close,
     QuestionFilled
 } from '@element-plus/icons-vue'
 import { open, save } from '@tauri-apps/plugin-dialog'
-import { invoke } from '@tauri-apps/api/core'
 import { copyFile, remove } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { listen } from '@tauri-apps/api/event'
@@ -1023,8 +959,7 @@ import DatePicker from '../components/DatePicker.vue'
 import StaffView from '../components/StaffView.vue'
 import DescView from '../components/DescView.vue'
 import SubmitStatsPage from '../components/SubmitStatsPage.vue'
-// 封面关键字匹配（三国英雄名称）
-import COVER_MATCH_KEYWORDS from '../constants/cover-match-keywords.json'
+import CoverUploader from '../components/CoverUploader.vue'
 
 type SubmitModeText = '单稿件' | '多稿件'
 
@@ -1052,21 +987,6 @@ const typeList = computed(() => utilsStore.typelist)
 const typeListV2 = computed(() => utilsStore.typeListV2)
 
 const currentVer = ref<string>('')
-
-// 封面显示URL
-const coverDisplayUrl = ref<string>('')
-const coverLoading = ref<boolean>(false)
-
-interface CoverMatchImage {
-    name: string
-    path: string
-    data_url: string
-}
-
-const coverMatchImages = ref<CoverMatchImage[]>([])
-const coverMatchLoading = ref<boolean>(false)
-const selectedMatchPath = ref<string>('')
-let coverMatchTimer: ReturnType<typeof setTimeout> | null = null
 
 // 响应式数据
 const selectedUser = ref<any>(null)
@@ -1870,7 +1790,7 @@ const configUser = ref<any>(null)
 const selectedCategory = ref<any>(null)
 const selectedSubCategory = ref<any>(null)
 const categoryPopoverVisible = ref(false)
-let generalUpdateTimer: number | null = null
+let generalUpdateTimer: ReturnType<typeof setInterval> | null = null
 
 const currentTemplate = computed(() => {
     if (!selectedUser.value || !currentTemplateName.value || !userConfigStore.configRoot?.config) {
@@ -2026,110 +1946,6 @@ const checkTemplateHasUnsavedChanges = (uid: number, templateName: string): bool
 }
 
 // 生命周期
-// 监听封面变化，异步加载显示用的封面URL
-watch(
-    () => currentForm.value?.cover,
-    async (newCover: string | undefined) => {
-        if (newCover && selectedUser.value) {
-            try {
-                coverLoading.value = true
-                const downloadedCover = await utilsStore.downloadCover(
-                    selectedUser.value.uid,
-                    newCover
-                )
-                coverDisplayUrl.value = downloadedCover || ''
-            } catch (error) {
-                console.error('Failed to download cover:', error)
-                clearCurrentCover()
-            } finally {
-                coverLoading.value = false
-            }
-        } else {
-            coverDisplayUrl.value = ''
-            coverLoading.value = false
-        }
-    }
-)
-
-// 根据标题匹配封面路径中的图片
-const refreshCoverMatch = async (title: string) => {
-    // 清除旧定时器
-    if (coverMatchTimer) {
-        clearTimeout(coverMatchTimer)
-        coverMatchTimer = null
-    }
-
-    // 没有配置封面匹配路径时清空
-    const coverMatchPath = userConfigStore.configRoot?.cover_match_path || ''
-    if (!title || !coverMatchPath) {
-        coverMatchImages.value = []
-        return
-    }
-
-    // 提取标题中包含的关键字
-    const matchedKeywords = COVER_MATCH_KEYWORDS.filter(keyword => title.includes(keyword))
-    if (matchedKeywords.length === 0) {
-        coverMatchImages.value = []
-        return
-    }
-
-    // 防抖，避免输入过程中频繁调用
-    coverMatchTimer = setTimeout(async () => {
-        coverMatchLoading.value = true
-        try {
-            const images = await invoke<CoverMatchImage[]>('list_cover_images', {
-                dirPath: coverMatchPath,
-                keywords: matchedKeywords
-            })
-            coverMatchImages.value = images || []
-        } catch (error) {
-            console.error('匹配封面失败:', error)
-            coverMatchImages.value = []
-        } finally {
-            coverMatchLoading.value = false
-        }
-    }, 300)
-}
-
-// 点击匹配的封面图片，上传并设置为封面
-const setCoverFromMatch = async (filePath: string) => {
-    if (templateLoading.value) {
-        return
-    }
-    if (!selectedUser.value || !currentTemplate.value || !currentForm.value) {
-        utilsStore.showMessage('请先选择用户和模板', 'warning')
-        return
-    }
-
-    try {
-        coverLoading.value = true
-        templateLoading.value = true
-        const url = await utilsStore.uploadCover(selectedUser.value.uid, filePath)
-        if (url) {
-            selectedMatchPath.value = filePath
-            currentTemplate.value.cover = url
-            currentForm.value.cover = url
-            utilsStore.showMessage('已设置封面', 'success')
-        } else {
-            throw new Error('封面上传失败')
-        }
-    } catch (error) {
-        console.error('设置封面失败: ', error)
-        utilsStore.showMessage(`设置封面失败: ${error}`, 'error')
-    } finally {
-        coverLoading.value = false
-        templateLoading.value = false
-    }
-}
-
-// 监听标题变化，实时匹配封面
-watch(
-    () => currentForm.value?.title,
-    (newTitle: string | undefined) => {
-        refreshCoverMatch(newTitle || '')
-    }
-)
-
 // 监听标签变化，更新表单数据
 watch(
     () => tags.value,
@@ -2163,31 +1979,6 @@ watch(
             // 如果没有分区信息，清空分区选择
             selectedCategory.value = null
             selectedSubCategory.value = null
-        }
-    }
-)
-
-// 监听用户切换，重新加载封面
-watch(
-    () => selectedUser.value,
-    async (newUser: any) => {
-        if (currentForm.value?.cover && newUser) {
-            try {
-                coverLoading.value = true
-                const downloadedCover = await utilsStore.downloadCover(
-                    newUser.uid,
-                    currentForm.value.cover
-                )
-                coverDisplayUrl.value = downloadedCover || ''
-            } catch (error) {
-                console.error('Failed to download cover:', error)
-                clearCurrentCover()
-            } finally {
-                coverLoading.value = false
-            }
-        } else {
-            coverDisplayUrl.value = ''
-            coverLoading.value = false
         }
     }
 )
@@ -2783,8 +2574,6 @@ const clearCardContent = async (cardType: 'basic' | 'tags' | 'description' | 'ad
                 // 同步清空分区选择状态
                 selectedCategory.value = null
                 selectedSubCategory.value = null
-                // 清空封面显示
-                coverDisplayUrl.value = ''
                 break
 
             case 'tags':
@@ -3005,13 +2794,6 @@ const toggleUserExpanded = (userUid: number) => {
 const handleTemplateNameEdit = () => {
     if (!templateLoading.value) {
         startEditTemplateName()
-    }
-}
-
-// 处理封面选择点击 - 在模板加载时禁用
-const handleCoverSelection = () => {
-    if (!templateLoading.value) {
-        selectCoverWithTauri()
     }
 }
 
@@ -3455,63 +3237,6 @@ const setSelectedCategoryByTid = (tid: number) => {
             }
         }
     }
-}
-
-// 选择封面
-const selectCoverWithTauri = async () => {
-    try {
-        const selected = await open({
-            multiple: false,
-            filters: [
-                {
-                    name: 'Image',
-                    extensions: ['jpg', 'jpeg', 'png', 'pjp', 'pjpeg', 'jiff', 'gif']
-                }
-            ]
-        })
-
-        if (!selected || selected.length === 0) {
-            utilsStore.showMessage('未选择任何封面文件', 'warning')
-            return
-        }
-
-        if (selectedUser.value && currentTemplate.value && currentForm.value) {
-            coverLoading.value = true
-            templateLoading.value = true
-            const url = await utilsStore.uploadCover(selectedUser.value.uid, selected)
-            if (url) {
-                currentTemplate.value.cover = url
-                currentForm.value.cover = url
-            } else {
-                throw new Error('封面上传失败')
-            }
-        } else {
-            utilsStore.showMessage('请先选择用户和模板', 'error')
-        }
-    } catch (error) {
-        console.error('封面选择失败: ', error)
-        utilsStore.showMessage(`'封面选择失败: ${error}'`, 'error')
-        return
-    } finally {
-        coverLoading.value = false
-        templateLoading.value = false
-    }
-}
-
-const clearCurrentCover = () => {
-    if (templateLoading.value) {
-        return
-    }
-
-    if (!currentForm.value || !currentTemplate.value) {
-        utilsStore.showMessage('请先选择用户和模板', 'warning')
-        return
-    }
-
-    currentTemplate.value.cover = ''
-    currentForm.value.cover = ''
-    coverDisplayUrl.value = ''
-    utilsStore.showMessage('已清除封面', 'success')
 }
 
 // 使用 Tauri 文件对话框选择视频文件
@@ -4307,131 +4032,6 @@ const checkUpdate = async () => {
     font-weight: 500;
 }
 
-.cover-uploader-row {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.cover-match-list {
-    margin-top: 12px;
-    width: 100%;
-}
-
-.cover-match-label {
-    font-size: 12px;
-    color: #8c939d;
-    margin-bottom: 8px;
-}
-
-.cover-match-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    min-height: 40px;
-}
-
-.cover-match-item {
-    width: 84px;
-    height: 48px;
-    border-radius: 4px;
-    overflow: hidden;
-    cursor: pointer;
-    border: 2px solid transparent;
-    position: relative; /* 让 z-index 生效 */
-    z-index: 1;
-    transition:
-        border-color 0.2s ease,
-        transform 0.2s ease,
-        box-shadow 0.2s ease;
-}
-
-.cover-match-item img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-}
-
-.cover-match-item:hover {
-    transform: scale(4) translateX(25px);
-    border-color: #409eff;
-    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
-    z-index: 999; /* 确保悬浮时在最顶层 */
-}
-
-.cover-match-item.active {
-    border-color: #409eff;
-    box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.3);
-}
-
-.cover-uploader {
-    position: relative;
-    display: inline-block;
-    z-index: 1; /* 确保容器有基础层级 */
-}
-
-.cover-uploader .cover-image {
-    width: 100px;
-    height: 60px;
-    object-fit: cover;
-    border-radius: 4px;
-    transition:
-        transform 0.3s ease,
-        box-shadow 0.3s ease;
-    cursor: pointer;
-    position: relative; /* 重要：让 z-index 生效 */
-}
-
-.cover-clear-btn-side {
-    align-self: center;
-    background: transparent;
-    border: none;
-    box-shadow: none;
-    color: #9ca3af;
-    padding: 0;
-    min-width: 14px;
-    width: 14px;
-    height: 14px;
-    line-height: 14px;
-    font-size: 12px;
-    transition: opacity 0.2s ease;
-}
-
-.cover-clear-btn-side:hover {
-    background: transparent;
-    border: none;
-    color: #ef4444;
-}
-
-.cover-clear-btn-side :deep(.el-icon) {
-    font-size: 12px;
-}
-
-.cover-uploader:hover + .cover-clear-btn-side {
-    opacity: 0;
-    pointer-events: none;
-}
-
-.cover-uploader .cover-image:hover {
-    transform: scale(4) translateX(25px);
-    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
-    z-index: 999; /* 确保悬浮时在最顶层 */
-    position: relative; /* 确保定位生效 */
-}
-
-.cover-uploader-icon {
-    width: 100px;
-    height: 60px;
-    border: 1px dashed #d9d9d9;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #8c939d;
-    font-size: 24px;
-}
-
 .upload-tip {
     color: #909399;
     font-size: 12px;
@@ -4850,16 +4450,6 @@ const checkUpdate = async () => {
     color: #ffd700;
     font-weight: 500;
     margin-top: 15px;
-}
-
-/* 禁用状态样式 */
-.cover-uploader.disabled {
-    cursor: not-allowed !important;
-    opacity: 0.6 !important;
-}
-
-.cover-uploader.disabled:hover {
-    border-color: #dcdfe6 !important;
 }
 
 .template-name-display.disabled {
