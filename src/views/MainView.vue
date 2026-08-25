@@ -1797,6 +1797,38 @@ const selectedCategory = ref<any>(null)
 const selectedSubCategory = ref<any>(null)
 const categoryPopoverVisible = ref(false)
 let generalUpdateTimer: ReturnType<typeof setInterval> | null = null
+// 轮询防重入标志，避免上一次请求未完成时重复发起
+let queuePolling = false
+
+// 判断上传队列中是否有需要轮询的活跃任务
+const hasActiveUploadTasks = () => {
+    return uploadStore.uploadQueue.some(
+        task =>
+            task.status === 'Running' ||
+            task.status === 'Waiting' ||
+            task.status === 'Pending'
+    )
+}
+
+// 将已完成任务的文件信息同步到模板配置
+const syncCompletedTasksToConfig = () => {
+    for (const task of uploadStore.uploadQueue) {
+        if (task.status === 'Completed') {
+            const templateName = task.template
+            const uid = task.user.uid
+            const videos =
+                userConfigStore.configRoot?.config[uid]?.templates[templateName]?.videos || []
+
+            const video = videos.find(v => v.id === task.video?.id)
+            if (video && video.filename !== task.video?.filename) {
+                video.filename = task.video.filename
+                video.path = task.video.path
+                video.complete = true
+                video.finished_at = task.finished_at
+            }
+        }
+    }
+}
 
 const currentTemplate = computed(() => {
     if (!selectedUser.value || !currentTemplateName.value || !userConfigStore.configRoot?.config) {
@@ -2203,28 +2235,29 @@ const initializeData = async () => {
             await userConfigStore.ensureUserTemplatesReady()
             await uploadStore.getUploadQueue()
             if (!generalUpdateTimer) {
-                generalUpdateTimer = setInterval(() => {
-                    if (authStore.loginUsers.length > 0) {
-                        uploadStore.getUploadQueue()
+                generalUpdateTimer = setInterval(async () => {
+                    // 无登录用户时不轮询
+                    if (authStore.loginUsers.length === 0) {
+                        return
                     }
-                    for (const task of uploadStore.uploadQueue) {
-                        if (task.status === 'Completed') {
-                            const templateName = task.template
-                            const uid = task.user.uid
-                            const videos =
-                                userConfigStore.configRoot?.config[uid]?.templates[templateName]
-                                    ?.videos || []
-
-                            const video = videos.find(v => v.id === task.video?.id)
-                            if (video && video.filename !== task.video?.filename) {
-                                video.filename = task.video.filename
-                                video.path = task.video.path
-                                video.complete = true
-                                video.finished_at = task.finished_at
-                            }
-                        }
+                    // 避免上一次请求未完成时重复发起
+                    if (queuePolling) {
+                        return
                     }
-                }, 666) // 更新上传队列
+                    // 没有活跃上传任务时跳过，避免无效的后端请求
+                    if (!hasActiveUploadTasks()) {
+                        return
+                    }
+                    queuePolling = true
+                    try {
+                        await uploadStore.getUploadQueue()
+                        syncCompletedTasksToConfig()
+                    } catch (error) {
+                        console.error('轮询上传队列失败:', error)
+                    } finally {
+                        queuePolling = false
+                    }
+                }, 2000) // 上传进度轮询周期
             }
         }
 
