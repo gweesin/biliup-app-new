@@ -136,6 +136,17 @@
                             </div>
                         </div>
 
+                        <!-- 每个视频独立封面设置 -->
+                        <div class="video-cover-row">
+                            <CoverUploader
+                                :model-value="video.cover || ''"
+                                :title="video.title || video.videoname"
+                                :uid="uid"
+                                :disabled="disabled"
+                                @update:model-value="(val: string) => handleVideoCoverChange(video.id, val)"
+                            />
+                        </div>
+
                         <!-- 进度条区域 -->
                         <div class="progress-section">
                             <div
@@ -254,6 +265,7 @@ import {
 } from '@element-plus/icons-vue'
 import { useUploadStore } from '../stores/upload'
 import FloderWatch from './FloderWatch.vue'
+import CoverUploader from './CoverUploader.vue'
 
 // Props
 interface Props {
@@ -261,11 +273,14 @@ interface Props {
     isDragOver?: boolean
     uploading?: boolean
     templateTitle?: string
+    uid?: number
+    disabled?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
     isDragOver: false,
-    uploading: false
+    uploading: false,
+    disabled: false
 })
 
 // Emits
@@ -299,7 +314,7 @@ const templateTitle = computed(() => props.templateTitle)
 
 // 用于触发时间更新的响应式变量
 const currentTime = ref(Date.now())
-let timeUpdateTimer: number | null = null
+let timeUpdateTimer: ReturnType<typeof setInterval> | null = null
 
 // 定时更新当前时间，用于相对时间的实时更新
 onMounted(() => {
@@ -438,6 +453,20 @@ const saveVideoTitle = (id: string) => {
 
     emit('update:videos', newVideos)
     cancelEditVideoTitle()
+}
+
+// 更新单个视频的封面
+const handleVideoCoverChange = (id: string, cover: string) => {
+    const newVideos = props.videos.map(video => {
+        if (video.id === id) {
+            return {
+                ...video,
+                cover
+            }
+        }
+        return video
+    })
+    emit('update:videos', newVideos)
 }
 
 const applyUnifiedNameAffixes = () => {
@@ -917,6 +946,10 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+}
+
+.video-cover-row {
+    margin-top: 8px;
 }
 
 .video-title-container {

@@ -437,6 +437,7 @@
                                             :uploading="uploading"
                                             :template-title="currentTemplateName"
                                             :disabled="templateLoading"
+                                            :uid="selectedUser.uid"
                                             @select-video="selectVideoWithTauri"
                                             @clear-all-videos="clearAllVideos"
                                             @remove-file="removeUploadedFile"
