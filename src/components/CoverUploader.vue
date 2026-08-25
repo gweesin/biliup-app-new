@@ -91,6 +91,8 @@ const coverMatchImages = ref<CoverMatchImage[]>([])
 const coverMatchLoading = ref<boolean>(false)
 const selectedMatchPath = ref<string>('')
 let coverMatchTimer: ReturnType<typeof setTimeout> | null = null
+// 上次匹配的关键字组合（含匹配路径），用于避免相同关键字重复请求
+let lastMatchKey = ''
 
 // 监听封面变化，下载封面
 watch(
@@ -127,6 +129,7 @@ const refreshCoverMatch = async (title: string) => {
     const coverMatchPath = userConfigStore.configRoot?.cover_match_path || ''
     if (!title || !coverMatchPath) {
         coverMatchImages.value = []
+        lastMatchKey = ''
         return
     }
 
@@ -134,11 +137,19 @@ const refreshCoverMatch = async (title: string) => {
     const matchedKeywords = COVER_MATCH_KEYWORDS.filter(keyword => title.includes(keyword))
     if (matchedKeywords.length === 0) {
         coverMatchImages.value = []
+        lastMatchKey = ''
+        return
+    }
+
+    // 上次命中的关键字组合一致时无需重新请求
+    const matchKey = `${coverMatchPath}|${matchedKeywords.join(',')}`
+    if (matchKey === lastMatchKey) {
         return
     }
 
     // 防抖，避免输入过程中频繁调用
     coverMatchTimer = setTimeout(async () => {
+        lastMatchKey = matchKey
         coverMatchLoading.value = true
         try {
             const images = await invoke<CoverMatchImage[]>('list_cover_images', {
