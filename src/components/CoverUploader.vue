@@ -194,12 +194,13 @@ const setCoverFromMatch = async (filePath: string) => {
     }
 }
 
-// 监听标题变化，实时匹配封面
+// 监听标题变化，实时匹配封面（immediate 确保组件挂载时已有标题也能立即匹配）
 watch(
     () => props.title,
     (newTitle: string | undefined) => {
         refreshCoverMatch(newTitle || '')
-    }
+    },
+    { immediate: true }
 )
 
 // 监听用户切换，重新加载封面
