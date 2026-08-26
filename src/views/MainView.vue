@@ -1619,6 +1619,11 @@ const processSeparateSubmitQueue = async (templateKey: string) => {
         if(singleVideo.cover) {
             singleTemplate.cover = singleVideo.cover
         }
+
+        // 如果视频有定时发布时间，则使用视频定时发布时间，否则使用模板定时发布时间
+        if(singleVideo.dtime) {
+            singleTemplate.dtime = singleVideo.dtime
+        }
         const cancelKey = getSeparateSubmitCancelKey(uid, templateName)
 
         try {

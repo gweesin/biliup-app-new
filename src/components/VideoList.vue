@@ -133,6 +133,13 @@
                                 >
                                     {{ getStatusText(video.status || 'Waiting') }}
                                 </span>
+                                <span
+                                    v-if="publishTimeTexts[index]"
+                                    class="publish-time"
+                                    :title="`预计发布：${publishTimeTexts[index]}`"
+                                >
+                                    {{ publishTimeTexts[index] }}
+                                </span>
                             </div>
                         </div>
 
@@ -219,6 +226,27 @@
                         placeholder="输入后缀"
                         maxlength="80"
                     />
+                </div>
+                <div class="batch-rename-item schedule-item">
+                    <span class="schedule-label">定时发布</span>
+                    <el-date-picker
+                        v-model="scheduleStartDate"
+                        type="date"
+                        size="small"
+                        placeholder="选择开始日期"
+                        value-format="YYYY-MM-DD"
+                        :clearable="false"
+                        class="schedule-date-picker"
+                    />
+                    <el-input-number
+                        v-model="videosPerTimeSlot"
+                        :min="1"
+                        :max="99"
+                        size="small"
+                        controls-position="right"
+                        class="schedule-count-input"
+                    />
+                    <span class="schedule-tip">个/时段</span>
                 </div>
                 <div class="sort-tools">
                     <el-button
@@ -309,6 +337,123 @@ const unifiedSuffixValue = ref('')
 const lastAppliedPrefix = ref('')
 const lastAppliedSuffix = ref('')
 
+// 定时发布时间排布配置
+const TIME_SLOTS = [9, 12, 18, 23] // 每天发布的时间点：9点、12点、18点、23点
+const scheduleStartDate = ref('')
+const videosPerTimeSlot = ref(1)
+
+// 默认开始日期为今天（本地时区）
+const now = new Date()
+scheduleStartDate.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+
+// 每个时间点的视频数量（至少为1）
+const getVideosPerTimeSlot = () =>
+    Math.max(1, Math.floor(Number(videosPerTimeSlot.value)) || 1)
+
+// 简单字符串哈希，作为随机种子
+const hashSeed = (str: string): number => {
+    let h = 0
+    for (let i = 0; i < str.length; i++) {
+        h = (h * 31 + str.charCodeAt(i)) >>> 0
+    }
+    return h
+}
+
+// 基于种子的伪随机数生成器（mulberry32），保证同一配置下时间稳定不跳动
+const mulberry32 = (seed: number) => {
+    let a = seed >>> 0
+    return () => {
+        a |= 0
+        a = (a + 0x6d2b79f5) | 0
+        let t = Math.imul(a ^ (a >>> 15), 1 | a)
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+}
+
+const pad2 = (n: number) => String(n).padStart(2, '0')
+
+// 按列表顺序计算某个位置的视频发布时间
+// 每天有 TIME_SLOTS.length 个时间点，每个时间点发布 videosPerTimeSlot 个视频，
+// 一天最多发布 perDay = videosPerTimeSlot * 4 个，超过则顺延到下一天
+// 同一时段内的每个视频在整点前后约45分钟窗口内取随机分钟并升序排列，
+// 保证整体从早到晚有序，同时时间点随机化（如 08:52、09:17）
+const getPublishTimeByIndex = (index: number): Date | null => {
+    const startDateRaw = scheduleStartDate.value as unknown
+    if (!startDateRaw) return null
+
+    // 兼容字符串（YYYY-MM-DD）与 Date 对象两种取值
+    const startDate: Date | string =
+        startDateRaw instanceof Date ? startDateRaw : String(startDateRaw)
+
+    const perSlot = getVideosPerTimeSlot()
+    const perDay = perSlot * TIME_SLOTS.length
+    const dayOffset = Math.floor(index / perDay)
+    const slotIndex = Math.min(Math.floor((index % perDay) / perSlot), TIME_SLOTS.length - 1)
+    const posInSlot = index % perSlot
+
+    const base = new Date(startDate instanceof Date ? startDate : `${startDate}T00:00:00`)
+    if (isNaN(base.getTime())) return null
+    base.setDate(base.getDate() + dayOffset)
+    const year = base.getFullYear()
+    const month = base.getMonth() + 1
+    const day = base.getDate()
+
+    // 以 (日期, 时段, 每时段数量) 为种子，保证切换数量时时间也会重新随机生成
+    const rand = mulberry32(hashSeed(`${year}-${month}-${day}-${slotIndex}-${perSlot}`))
+    const offsets: number[] = []
+    for (let i = 0; i < perSlot; i++) {
+        offsets.push(Math.floor(rand() * 90) - 45) // -45 ~ +44 分钟
+    }
+    offsets.sort((a, b) => a - b)
+
+    const totalMinutes = TIME_SLOTS[slotIndex] * 60 + offsets[posInSlot]
+    const hour = Math.floor(totalMinutes / 60)
+    const minute = totalMinutes % 60
+
+    base.setHours(hour, minute, 0, 0)
+    return base
+}
+
+// 格式化发布时间显示文本（MM-DD HH:mm）
+const formatScheduleTime = (date: Date): string => {
+    return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+// 视频 id -> 稳定排期序号
+// 新视频首次进入列表时按列表顺序分配序号，之后无论列表如何增删（如上传成功后从头移除），
+// 已分配的视频发布时间都保持不变
+const scheduleIndexMap = ref<Record<string, number>>({})
+
+const syncScheduleIndexes = (list: any[]) => {
+    const map = scheduleIndexMap.value
+    const ids = list.map(v => String(v.id))
+    const idSet = new Set(ids)
+
+    // 清理已不在列表中的视频，释放序号
+    for (const key of Object.keys(map)) {
+        if (!idSet.has(key)) {
+            delete map[key]
+        }
+    }
+
+    // 为新增视频分配后续序号，保持它们在列表中的相对顺序
+    const existing = Object.values(map)
+    let nextIndex = existing.length > 0 ? Math.max(...existing) + 1 : 0
+    for (const id of ids) {
+        if (!(id in map)) {
+            map[id] = nextIndex++
+        }
+    }
+}
+
+// 视频列表增删变化时同步排期序号
+watch(
+    () => props.videos.map(v => String(v.id)).join('|'),
+    () => syncScheduleIndexes(props.videos),
+    { immediate: true }
+)
+
 // 模板标题
 const templateTitle = computed(() => props.templateTitle)
 
@@ -390,6 +535,52 @@ const updatedVideos = computed(() => {
     }
 
     return updatedList
+})
+
+// 与 updatedVideos 顺序一一对应的发布时间(Date)列表
+// 基于稳定排期序号（scheduleIndexMap）计算，列表缩短/增删不会导致已分配时间变动
+const publishTimes = computed<(Date | null)[]>(() => {
+    return updatedVideos.value.map(video => {
+        const scheduleIndex = scheduleIndexMap.value[String(video.id)]
+        return scheduleIndex === undefined ? null : getPublishTimeByIndex(scheduleIndex)
+    })
+})
+
+// 发布时间的显示文本列表
+const publishTimeTexts = computed<string[]>(() => {
+    return publishTimes.value.map(date => (date ? formatScheduleTime(date) : ''))
+})
+
+// 根据发布时间列表回填 video 的 dtime 字段（Unix 秒），仅在实际变化时触发更新
+const syncDtimeFromPublishTimes = (times: (Date | null)[]) => {
+    if (!props.videos || props.videos.length === 0) return
+
+    let hasChanged = false
+    const newVideos = props.videos.map((video, index) => {
+        const date = times[index]
+        const dtime = date ? Math.floor(date.getTime() / 1000) : 0
+        if (video.dtime !== dtime) {
+            hasChanged = true
+            return { ...video, dtime }
+        }
+        return video
+    })
+
+    if (hasChanged) {
+        emit('update:videos', newVideos)
+    }
+}
+
+// 监听发布时间变化，同步回填 dtime
+watch(
+    publishTimes,
+    times => syncDtimeFromPublishTimes(times),
+    { immediate: true }
+)
+
+// 切换日期或每时段数量后，强制重新计算并同步更新预计发布时间
+watch([scheduleStartDate, videosPerTimeSlot], () => {
+    syncDtimeFromPublishTimes(publishTimes.value)
 })
 
 // 重新排序视频
@@ -802,6 +993,30 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     width: 120px;
 }
 
+.schedule-item {
+    gap: 6px;
+}
+
+.schedule-label {
+    font-size: 12px;
+    color: #606266;
+    white-space: nowrap;
+}
+
+.schedule-date-picker {
+    width: 135px;
+}
+
+.schedule-count-input {
+    width: 70px;
+}
+
+.schedule-tip {
+    font-size: 10px;
+    color: #909399;
+    white-space: nowrap;
+}
+
 .sort-tools {
     margin-left: auto;
     display: flex;
@@ -820,8 +1035,6 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     display: flex;
     flex-direction: column;
     gap: 4px;
-    max-height: 500px;
-    overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: #c1c1c1 transparent;
     border-radius: 6px;
@@ -1001,6 +1214,9 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
 
 .video-status {
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
 }
 
 .video-status .status-text {
@@ -1009,6 +1225,17 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     font-size: 9px;
     font-weight: 500;
     line-height: 1.2;
+}
+
+.video-status .publish-time {
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 9px;
+    font-weight: 500;
+    line-height: 1.2;
+    white-space: nowrap;
+    background: #f0f9eb;
+    color: #67c23a;
 }
 
 .video-status .status-text.complete {
