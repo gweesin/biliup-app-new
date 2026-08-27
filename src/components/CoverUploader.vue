@@ -273,17 +273,6 @@ const selectCoverWithTauri = async () => {
     }
 }
 
-// 点击复制标题文本
-const copyTitle = async () => {
-    if (!props.title) return
-    try {
-        await navigator.clipboard.writeText(props.title)
-        utilsStore.showMessage('标题已复制', 'success')
-    } catch {
-        utilsStore.showMessage('复制失败，请手动选择文本复制', 'warning')
-    }
-}
-
 const clearCurrentCover = () => {
     if (props.disabled) {
         return
@@ -315,23 +304,6 @@ onBeforeUnmount(() => {
     gap: 10px;
 }
 
-.cover-title {
-    margin-top: 6px;
-    max-width: 220px;
-    font-size: 12px;
-    color: #909399;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    cursor: pointer;
-    user-select: text;
-    transition: color 0.2s ease;
-}
-
-.cover-title:hover {
-    color: #409eff;
-}
-
 .cover-match-list {
     margin-top: 12px;
     width: 100%;
@@ -351,14 +323,16 @@ onBeforeUnmount(() => {
 }
 
 .cover-match-item {
+    display: flex;
+    flex-direction: column;
     width: 84px;
-    height: 48px;
     border-radius: 4px;
     overflow: hidden;
     cursor: pointer;
     border: 2px solid transparent;
     position: relative; /* 让 z-index 生效 */
     z-index: 1;
+    background: #f5f7fa;
     transition:
         border-color 0.2s ease,
         transform 0.2s ease,
@@ -366,10 +340,22 @@ onBeforeUnmount(() => {
 }
 
 .cover-match-item img {
-    width: 100%;
-    height: 100%;
+    width: 84px;
+    height: 48px;
     object-fit: cover;
     display: block;
+}
+
+.cover-match-name {
+    width: 100%;
+    padding: 3px 4px 4px;
+    font-size: 11px;
+    line-height: 1.3;
+    color: #909399;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .cover-match-item:hover {
