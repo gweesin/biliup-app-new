@@ -50,6 +50,7 @@
                 @click="setCoverFromMatch(img.path)"
             >
                 <img :src="img.data_url" :alt="img.name" loading="lazy" />
+                <span class="cover-match-name">{{ img.name }}</span>
             </div>
         </div>
     </div>
@@ -272,6 +273,17 @@ const selectCoverWithTauri = async () => {
     }
 }
 
+// 点击复制标题文本
+const copyTitle = async () => {
+    if (!props.title) return
+    try {
+        await navigator.clipboard.writeText(props.title)
+        utilsStore.showMessage('标题已复制', 'success')
+    } catch {
+        utilsStore.showMessage('复制失败，请手动选择文本复制', 'warning')
+    }
+}
+
 const clearCurrentCover = () => {
     if (props.disabled) {
         return
@@ -301,6 +313,23 @@ onBeforeUnmount(() => {
     display: inline-flex;
     align-items: center;
     gap: 10px;
+}
+
+.cover-title {
+    margin-top: 6px;
+    max-width: 220px;
+    font-size: 12px;
+    color: #909399;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    user-select: text;
+    transition: color 0.2s ease;
+}
+
+.cover-title:hover {
+    color: #409eff;
 }
 
 .cover-match-list {
