@@ -255,14 +255,57 @@ export const useUtilsStore = defineStore('template', () => {
         }
     }
 
+    // 安全序列化日志参数：
+    // - 字符串直接返回
+    // - Error 对象提取 name/message/stack，避免序列化成 {}
+    // - 其他对象用带「祖先栈」的 replacer，把循环引用（如 Vue 组件实例 component -> vnode）
+    //   替换为占位符，避免 JSON.stringify 抛 "Converting circular structure to JSON"
+    const safeStringifyLog = (value: any): string => {
+        if (typeof value === 'string') return value
+
+        if (value instanceof Error) {
+            return JSON.stringify({ name: value.name, message: value.message, stack: value.stack })
+        }
+
+        const ancestors: any[] = []
+        try {
+            return JSON.stringify(value, function (this: any, _key: string, currentValue: any): any {
+                if (typeof currentValue === 'bigint') {
+                    return String(currentValue)
+                }
+                if (typeof currentValue !== 'object' || currentValue === null) {
+                    return currentValue
+                }
+                // 祖先栈回退到当前节点的父级（this），再判断当前节点是否已在栈中（即循环引用）
+                while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) {
+                    ancestors.pop()
+                }
+                if (ancestors.includes(currentValue)) {
+                    return '[Circular]'
+                }
+                ancestors.push(currentValue)
+                return currentValue
+            })
+        } catch (error) {
+            return `[序列化失败: ${error}]`
+        }
+    }
+
+    // 防止日志转发失败时 catch 里的 console.error 再次进入本函数造成递归
+    let logForwarding = false
+
     const log = async (level: string, ...messages: any[]) => {
+        if (logForwarding) return
+        logForwarding = true
         try {
             await invoke('console_log', {
                 level,
-                messages: messages.map(msg => (typeof msg === 'string' ? msg : JSON.stringify(msg)))
+                messages: messages.map(msg => safeStringifyLog(msg))
             })
         } catch (error) {
             console.error('日志转发失败:', error)
+        } finally {
+            logForwarding = false
         }
     }
 
