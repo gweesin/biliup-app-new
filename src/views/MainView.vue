@@ -146,23 +146,11 @@
                                     size="large"
                                     :disabled="templateLoading"
                                 />
-                                <span
-                                    v-if="lastPublishedInfo"
-                                    class="last-published-badge"
-                                    :class="{ scheduled: lastPublishedInfo.isScheduled }"
-                                    :title="`匹配稿件：${lastPublishedInfo.title}（${lastPublishedInfo.bvid}）`"
-                                >
-                                    <el-icon><clock /></el-icon>
-                                    {{ lastPublishedInfo.isScheduled ? '定时发布时间' : '上次发布时间' }}：
-                                    {{ formatPublishedTime(lastPublishedInfo.time) }}
-                                </span>
-                                <span
-                                    v-else-if="publishedArchivesLoading && currentForm?.title"
-                                    class="last-published-badge loading"
-                                >
-                                    <el-icon><clock /></el-icon>
-                                    查询已发布视频中…
-                                </span>
+                                <LastPublishedBadge
+                                    ref="lastPublishedBadgeRef"
+                                    :uid="selectedUser?.uid ?? 0"
+                                    :title="currentTemplateName"
+                                />
                             </div>
                             <div class="header-actions">
                                 <el-button @click="resetTemplate" :disabled="templateLoading"
@@ -944,7 +932,7 @@ import { ref, onMounted, computed, nextTick, watch, onUnmounted } from 'vue'
 import { v4 as uuidv4 } from 'uuid'
 import { useAuthStore } from '../stores/auth'
 import { useUserConfigStore, TemplateConfig } from '../stores/user_config'
-import { useUtilsStore, type ArchiveListItem } from '../stores/utils'
+import { useUtilsStore } from '../stores/utils'
 import { useUploadStore } from '../stores/upload'
 import { ElMessageBox } from 'element-plus'
 import {
@@ -955,8 +943,7 @@ import {
     Setting,
     Refresh,
     Delete,
-    QuestionFilled,
-    Clock
+    QuestionFilled
 } from '@element-plus/icons-vue'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { copyFile, remove } from '@tauri-apps/plugin-fs'
@@ -979,6 +966,7 @@ import StaffView from '../components/StaffView.vue'
 import DescView from '../components/DescView.vue'
 import SubmitStatsPage from '../components/SubmitStatsPage.vue'
 import CoverUploader from '../components/CoverUploader.vue'
+import LastPublishedBadge from '../components/LastPublishedBadge.vue'
 
 type SubmitModeText = '单稿件' | '多稿件'
 
@@ -1010,9 +998,7 @@ const currentVer = ref<string>('')
 // 响应式数据
 const selectedUser = ref<any>(null)
 const currentTemplateName = ref<string>('')
-// 已发布稿件列表（用于展示模板对应视频的发布时间）
-const publishedArchives = ref<ArchiveListItem[]>([])
-const publishedArchivesLoading = ref(false)
+const lastPublishedBadgeRef = ref<InstanceType<typeof LastPublishedBadge> | null>(null)
 const showNewTemplateDialog = ref(false)
 const showLoginDialog = ref(false)
 const showGlobalConfigDialog = ref(false)
@@ -1451,7 +1437,7 @@ const performTemplateSubmit = async (
 
         // 投稿成功后延时刷新已发布稿件列表，更新发布时间展示
         if (selectedUser.value?.uid === uid) {
-            setTimeout(() => fetchPublishedArchives(uid), 1500)
+            setTimeout(() => lastPublishedBadgeRef.value?.refresh(), 1500)
         }
 
         utilsStore.showMessage(`视频${resp.bvid}提交成功 (模板: ${templateName})`, 'success')
@@ -1580,7 +1566,7 @@ const finalizeSeparateSubmitMode = async (templateKey: string) => {
         }
         // 投稿完成后延时刷新已发布稿件列表，更新发布时间展示
         if (successCount > 0) {
-            setTimeout(() => fetchPublishedArchives(submitState.uid), 1500)
+            setTimeout(() => lastPublishedBadgeRef.value?.refresh(), 1500)
         }
     }
 
@@ -1916,48 +1902,6 @@ const currentForm = computed({
         }
     }
 })
-
-// 已发布视频中标题含模板title的第一条数据（用于展示发布时间）
-const lastPublishedInfo = computed(() => {
-    const title = currentForm.value?.title?.trim()
-    if (!title || !publishedArchives.value.length) {
-        return null
-    }
-    const match = publishedArchives.value.find((item) => item.title && item.title.includes(title))
-    if (!match) {
-        return null
-    }
-    // 有定时发布时间(dtime)优先展示定时发布时间，否则展示实际发布时间(ptime)
-    const time = match.dtime > 0 ? match.dtime : match.ptime
-    return {
-        bvid: match.bvid,
-        title: match.title,
-        time,
-        isScheduled: match.dtime > 0
-    }
-})
-
-// 格式化稿件时间戳（秒）为本地时间字符串
-const formatPublishedTime = (timestamp: number): string => {
-    if (!timestamp || timestamp <= 0) {
-        return ''
-    }
-    return new Date(timestamp * 1000).toLocaleString()
-}
-
-// 拉取当前用户的已发布稿件列表
-const fetchPublishedArchives = async (uid: number) => {
-    publishedArchivesLoading.value = true
-    try {
-        const title = currentTemplateName.value
-        publishedArchives.value = await utilsStore.getArchives(uid, 'is_pubing,pubed', 1, 1, title).then(archives => archives.filter(archive => archive.title.includes(title)))
-    } catch (error) {
-        console.error('获取已发布稿件失败:', error)
-        publishedArchives.value = []
-    } finally {
-        publishedArchivesLoading.value = false
-    }
-}
 
 const tags = ref<string[]>([])
 
@@ -2955,8 +2899,6 @@ const selectTemplate = async (user: any, templateName: string) => {
         selectedUser.value = user
         currentTemplateName.value = templateName
 
-        // 拉取该用户已发布的稿件，用于展示模板对应视频的发布时间
-        fetchPublishedArchives(user.uid)
         // 滚动到顶部
         nextTick(() => {
             if (contentWrapperRef.value) {
@@ -4050,30 +3992,6 @@ const checkUpdate = async () => {
 
 .archive-state-badge.state-error {
     background: #f56c6c;
-}
-
-.last-published-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    line-height: 1.4;
-    color: #606266;
-    background: #f4f4f5;
-    border: 1px solid #e4e7ed;
-    white-space: nowrap;
-}
-
-.last-published-badge.scheduled {
-    color: #e6a23c;
-    background: #fdf6ec;
-    border-color: #f3d19e;
-}
-
-.last-published-badge.loading {
-    color: #909399;
 }
 
 .refresh-btn {
