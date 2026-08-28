@@ -272,6 +272,7 @@ pub async fn run() {
             upload_cover,
             download_cover,
             get_archive_pre,
+            get_archives,
             get_topic_list,
             search_topics,
             search_mention,

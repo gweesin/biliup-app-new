@@ -4,6 +4,17 @@ import { invoke } from '@tauri-apps/api/core'
 import { ElMessage } from 'element-plus'
 import type { MentionUserGroup } from '../types/mention'
 
+/** 稿件列表项（与后端 get_archives 命令返回结构对应） */
+export interface ArchiveListItem {
+    aid: number
+    bvid: string
+    title: string
+    state: number
+    stateDesc: string
+    dtime: number
+    ptime: number
+}
+
 export const useUtilsStore = defineStore('template', () => {
     const archieve_pre = ref<any>(null)
     const topiclist = ref<any[]>([])
@@ -182,6 +193,28 @@ export const useUtilsStore = defineStore('template', () => {
         }
     }
 
+    const getArchives = async (
+        uid: number,
+        status?: string,
+        fromPage?: number,
+        maxPages?: number,
+        keyword?: string
+    ): Promise<ArchiveListItem[]> => {
+        try {
+            const archives = (await invoke('get_archives', {
+                uid,
+                status: status ?? 'pubed',
+                fromPage: fromPage ?? 1,
+                maxPages,
+                keyword
+            })) as ArchiveListItem[]
+            return archives || []
+        } catch (error) {
+            console.error('获取稿件列表失败:', error)
+            throw error
+        }
+    }
+
     const getVideoSeason = async (uid: number, aid: number) => {
         if (!hasSeason) {
             return 0
@@ -327,6 +360,7 @@ export const useUtilsStore = defineStore('template', () => {
         searchTopics,
         searchMention,
         getVideoDetail,
+        getArchives,
         hasSeason,
         getSeasonList,
         getVideoSeason,

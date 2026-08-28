@@ -294,6 +294,56 @@ pub async fn get_archive_pre(app: tauri::AppHandle, uid: u64) -> Result<Value, A
     Ok(archive_pre_data)
 }
 
+/// 稿件列表项（用于前端展示发布时间等）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveListItem {
+    pub aid: u64,
+    pub bvid: String,
+    pub title: String,
+    pub state: i16,
+    pub state_desc: String,
+    pub dtime: u64,
+    pub ptime: u64,
+}
+
+/// 查询用户指定状态的稿件列表（默认已发布 "pubed"），返回标题/发布时间/定时发布时间等
+#[tauri::command]
+pub async fn get_archives(
+    app: tauri::AppHandle,
+    uid: u64,
+    status: Option<String>,
+    from_page: Option<u32>,
+    max_pages: Option<u32>,
+    keyword: Option<String>,
+) -> Result<Vec<ArchiveListItem>, AppError> {
+    let app_data = app.state::<AppData>();
+    let bilibili = app_data.get_bilibili(uid).await?;
+
+    let archives = bilibili
+        .recent_archives(
+            &status.unwrap_or_else(|| "is_pubing,pubed,not_pubed".to_string()),
+            from_page.unwrap_or(1),
+            max_pages,
+            keyword.as_deref(),
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("获取稿件列表失败: {e}")))?;
+
+    Ok(archives
+        .into_iter()
+        .map(|a| ArchiveListItem {
+            aid: a.aid,
+            bvid: a.bvid,
+            title: a.title,
+            state: a.state,
+            state_desc: a.state_desc,
+            dtime: a.dtime,
+            ptime: a.ptime,
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn get_topic_list(app: tauri::AppHandle, uid: u64) -> Result<Value, AppError> {
     let app_data = app.state::<AppData>();

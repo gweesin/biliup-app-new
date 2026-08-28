@@ -351,7 +351,7 @@ async fn upload_impl(task_mutex: Arc<Mutex<UploadTask>>) -> Result<()> {
 
     // 定义可用的上传线路列表
     let available_lines = [
-        "auto", "bda2", "ws", "qn", "bldsa", "tx", "txa", "bda", "alia",
+        "auto", "bda2", "bldsa", "tx", "txa", "alia", "cnbd", "atbd",
     ];
 
     // 根据重试次数自动选择线路
@@ -377,7 +377,7 @@ async fn upload_impl(task_mutex: Arc<Mutex<UploadTask>>) -> Result<()> {
         "bldsa" => line::bldsa(),
         "tx" => line::tx(),
         "txa" => line::txa(),
-        "bda" => line::bda(),
+        "bda" => line::bda2(),
         "alia" => line::alia(),
         _ => line::Probe::probe(&client.client).await?,
     };
@@ -440,7 +440,6 @@ async fn upload_impl(task_mutex: Arc<Mutex<UploadTask>>) -> Result<()> {
                         // rewrite the stored id & name
                         task_mutex.lock().await.video.filename = return_video.filename.clone();
                         task_mutex.lock().await.video.path.clear();
-                        task_mutex.lock().await.video.cid = return_video.cid as u64;
                         info!("上传任务完成: {} -> {}", task_title!(task_mutex), return_video.filename);
                         task_mutex.lock().await.complete();
 
