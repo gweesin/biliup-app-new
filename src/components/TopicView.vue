@@ -211,7 +211,7 @@ const handleSearch = (query?: string) => {
     if (searchQuery && searchQuery.trim()) {
         searchTimer.value = setTimeout(async () => {
             await performRemoteSearch(searchQuery.trim())
-        }, 1000)
+        }, 1000) as unknown as number
     }
 }
 

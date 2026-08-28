@@ -339,7 +339,7 @@ const startSMSCountdown = () => {
                 smsCountdownTimer = null
             }
         }
-    }, 1000)
+    }, 1000) as unknown as number
 }
 
 const clearSMSCountdown = () => {
@@ -436,7 +436,7 @@ const startQRPolling = () => {
     stopQRPolling()
     qrPollTimer = window.setInterval(() => {
         void pollQRLogin()
-    }, 1500)
+    }, 1500) as unknown as number
     void pollQRLogin()
 }
 

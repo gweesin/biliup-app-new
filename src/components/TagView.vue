@@ -403,7 +403,7 @@ const removeKeyboardListener = () => {
             cancelSelect()
         }
         focusTimeout = null
-    }, 0)
+    }, 0) as unknown as number
 }
 
 // 处理键盘导航
