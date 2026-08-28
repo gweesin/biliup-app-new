@@ -269,7 +269,7 @@ const qrStatusMessage = ref('')
 const qrStatusType = ref<'pending' | 'success' | 'warning' | 'error'>('pending')
 const loading = ref(false)
 const qrChecking = ref(false)
-let qrPollTimer: ReturnType<typeof window.setInterval> | null = null
+let qrPollTimer: ReturnType<typeof setInterval> | null = null
 
 // 高级选项
 const showAdvancedOptions = ref(false)
@@ -294,7 +294,7 @@ const smsForm = ref({
 const smsFormRef = ref()
 const smsCountdown = ref(0)
 const sendingCode = ref(false)
-let smsCountdownTimer: ReturnType<typeof window.setInterval> | null = null
+let smsCountdownTimer: ReturnType<typeof setInterval> | null = null
 const smsRecaptcha = ref({
     visible: false,
     url: '',
@@ -331,7 +331,7 @@ const startSMSCountdown = () => {
     }
 
     smsCountdown.value = 60
-    smsCountdownTimer = window.setInterval(() => {
+    smsCountdownTimer = setInterval(() => {
         smsCountdown.value--
         if (smsCountdown.value <= 0) {
             if (smsCountdownTimer !== null) {
@@ -339,7 +339,7 @@ const startSMSCountdown = () => {
                 smsCountdownTimer = null
             }
         }
-    }, 1000) as unknown as number
+    }, 1000)
 }
 
 const clearSMSCountdown = () => {
@@ -434,9 +434,9 @@ const pollQRLogin = async () => {
 
 const startQRPolling = () => {
     stopQRPolling()
-    qrPollTimer = window.setInterval(() => {
+    qrPollTimer = setInterval(() => {
         void pollQRLogin()
-    }, 1500) as unknown as number
+    }, 1500)
     void pollQRLogin()
 }
 

@@ -408,7 +408,7 @@ const lastCheckResult = ref<{
 
 // 定时开始相关状态
 const timeUntilStart = ref('')
-const startCountdownTimer = ref<number | null>(null)
+const startCountdownTimer = ref<ReturnType<typeof setInterval> | null>(null)
 
 // 文件大小跟踪：存储每个文件最近3次的大小记录
 const fileSizeHistory = ref<Map<string, number[]>>(new Map())
@@ -419,7 +419,7 @@ const compiledRegex = ref<RegExp | null>(null)
 const testFilename = ref('')
 
 // 定时器
-let monitorTimer: number | null = null
+let monitorTimer: ReturnType<typeof setInterval> | null = null
 
 // 监听窗口打开状态，每次打开时清空文件夹路径
 watch(visible, (newValue, oldValue) => {

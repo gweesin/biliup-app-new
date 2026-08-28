@@ -372,7 +372,7 @@ const handleNewTagKeydown = (event: KeyboardEvent) => {
 }
 
 // 键盘监听器管理
-let focusTimeout: number | null = null
+let focusTimeout: ReturnType<typeof setTimeout> | null = null
 const keyboardListenerAdded = ref(false)
 
 const addKeyboardListener = () => {
@@ -403,7 +403,7 @@ const removeKeyboardListener = () => {
             cancelSelect()
         }
         focusTimeout = null
-    }, 0) as unknown as number
+    }, 0)
 }
 
 // 处理键盘导航
