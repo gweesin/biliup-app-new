@@ -40,14 +40,31 @@ const lastPublishedInfo = computed(() => {
     }
 })
 
-// 拉取当前用户的已发布稿件列表
+// 拉取当前用户的相关稿件
+// 优先查正在发布的（is_pubing，含定时发布/审核中）；若没有匹配，再查已发布的（pubed）最新一条
 const fetchPublishedArchives = async (uid: number) => {
     loading.value = true
     try {
         const title = props.title
-        publishedArchives.value = await utilsStore
-            .getArchives(uid, 'is_pubing,pubed', 1, 1, title)
-            .then(archives => archives.filter(archive => archive.title.includes(title)))
+        if (!title) {
+            publishedArchives.value = []
+            return
+        }
+        const matchTitle = (archive: ArchiveListItem) =>
+            !!(archive.title && archive.title.includes(title))
+
+        // 1. 先查正在发布的稿件，命中即展示（可显示定时发布时间）
+        const pubingList = await utilsStore.getArchives(uid, 'is_pubing', 1, 1, title)
+        const pubingMatch = pubingList.find(matchTitle)
+        if (pubingMatch) {
+            publishedArchives.value = [pubingMatch]
+            return
+        }
+
+        // 2. 没有正在发布的匹配稿件，再查已发布稿件的最新一条
+        const pubedList = await utilsStore.getArchives(uid, 'pubed', 1, 1, title)
+        const pubedMatch = pubedList.find(matchTitle)
+        publishedArchives.value = pubedMatch ? [pubedMatch] : []
     } catch (error) {
         console.error('获取已发布稿件失败:', error)
         publishedArchives.value = []
