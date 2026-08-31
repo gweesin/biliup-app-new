@@ -33,9 +33,7 @@
     <div v-if="coverMatchImages.length > 0" class="cover-match-list">
         <div class="cover-match-label">
             匹配到
-            {{
-                coverMatchImages.length
-            }}
+            {{ coverMatchImages.length }}
             张封面，点击即可设置：
         </div>
         <div class="cover-match-grid" v-loading="coverMatchLoading">
@@ -167,14 +165,16 @@ const refreshCoverMatch = async (title: string) => {
     }, 300)
 }
 
-// 点击匹配的封面图片，上传并设置为封面
-const setCoverFromMatch = async (filePath: string) => {
+// 上传并设置匹配到的封面，silent 为 true 时静默处理（自动匹配场景不弹提示）
+const applyCoverFromMatch = async (filePath: string, silent = false): Promise<boolean> => {
     if (props.disabled) {
-        return
+        return false
     }
     if (!props.uid) {
-        utilsStore.showMessage('请先选择用户和模板', 'warning')
-        return
+        if (!silent) {
+            utilsStore.showMessage('请先选择用户和模板', 'warning')
+        }
+        return false
     }
 
     try {
@@ -183,17 +183,68 @@ const setCoverFromMatch = async (filePath: string) => {
         if (url) {
             selectedMatchPath.value = filePath
             emit('update:modelValue', url)
-            utilsStore.showMessage('已设置封面', 'success')
-        } else {
-            throw new Error('封面上传失败')
+            if (!silent) {
+                utilsStore.showMessage('已设置封面', 'success')
+            }
+            return true
         }
+        throw new Error('封面上传失败')
     } catch (error) {
         console.error('设置封面失败: ', error)
-        utilsStore.showMessage(`设置封面失败: ${error}`, 'error')
+        if (!silent) {
+            utilsStore.showMessage(`设置封面失败: ${error}`, 'error')
+        }
+        return false
     } finally {
         coverLoading.value = false
     }
 }
+
+// 点击匹配的封面图片，上传并设置为封面
+const setCoverFromMatch = (filePath: string) => {
+    applyCoverFromMatch(filePath)
+}
+
+// 自动随机设置封面：当前没有封面且匹配到图片时，随机取一张上传
+// autoCoverMatchKey 记录已处理过的匹配批次，autoSelecting 防止同一实例并发上传
+let autoCoverMatchKey = ''
+let autoSelecting = false
+
+const autoSelectRandomCover = async () => {
+    // 已有封面、被禁用、缺少用户或正在设置时不处理
+    if (autoSelecting || props.disabled || !props.uid || props.modelValue) {
+        return
+    }
+    if (coverMatchImages.value.length === 0) {
+        return
+    }
+
+    // 同一批匹配结果只自动设置一次，避免用户手动清除封面后被反复填充
+    const matchKey = coverMatchImages.value.map(img => img.path).join('|')
+    if (!matchKey || matchKey === autoCoverMatchKey) {
+        return
+    }
+
+    const randomIndex = Math.floor(Math.random() * coverMatchImages.value.length)
+    const randomImage = coverMatchImages.value[randomIndex]
+
+    autoSelecting = true
+    autoCoverMatchKey = matchKey
+    try {
+        const success = await applyCoverFromMatch(randomImage.path, true)
+        if (!success) {
+            // 上传失败时清除标记，允许后续重新尝试
+            autoCoverMatchKey = ''
+        }
+    } finally {
+        autoSelecting = false
+    }
+}
+
+// 匹配结果变化、用户切换或禁用状态变化时尝试自动随机设置封面
+watch([coverMatchImages, () => props.uid, () => props.disabled], () => {
+    autoSelectRandomCover()
+})
 
 // 监听标题变化，实时匹配封面（immediate 确保组件挂载时已有标题也能立即匹配）
 watch(
@@ -211,10 +262,7 @@ watch(
         if (props.modelValue && newUid) {
             try {
                 coverLoading.value = true
-                const downloadedCover = await utilsStore.downloadCover(
-                    newUid,
-                    props.modelValue
-                )
+                const downloadedCover = await utilsStore.downloadCover(newUid, props.modelValue)
                 coverDisplayUrl.value = downloadedCover || ''
             } catch (error) {
                 console.error('Failed to download cover:', error)
