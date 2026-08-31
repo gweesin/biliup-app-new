@@ -107,6 +107,51 @@ pub async fn get_file_size(file_path: String) -> Result<u64, AppError> {
     Ok(file_utils::get_file_size(path).map_err(AppError::Internal)?)
 }
 
+/// 删除原始本地视频文件（仅用于清理已发布/上传完成的稿件源文件）
+#[tauri::command]
+pub async fn delete_file(file_path: String) -> Result<bool, AppError> {
+    let path = Path::new(&file_path);
+
+    // 空路径直接视为删除成功，避免误报错误
+    if file_path.trim().is_empty() {
+        return Ok(true);
+    }
+
+    // 目录不删除，防止误删整个文件夹
+    if path.is_dir() {
+        return Err(AppError::Custom(format!(
+            "拒绝删除目录: {}",
+            file_path
+        )));
+    }
+
+    // 文件不存在视为已删除
+    if !path.exists() {
+        return Ok(true);
+    }
+
+    // 仅允许删除常见视频文件，避免误删其他类型文件
+    let allowed_exts = [
+        "mp4", "flv", "avi", "wmv", "mov", "webm", "mpeg4", "ts", "mpg", "rm", "rmvb", "mkv",
+        "m4v",
+    ];
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !allowed_exts.contains(&ext.as_str()) {
+        return Err(AppError::Custom(format!(
+            "拒绝删除非视频文件: {}",
+            file_path
+        )));
+    }
+
+    std::fs::remove_file(path).map_err(AppError::Io)?;
+    info!("已删除原始视频文件: {}", file_path);
+    Ok(true)
+}
+
 /// 递归读取目录
 #[tauri::command]
 pub async fn read_dir_recursive(

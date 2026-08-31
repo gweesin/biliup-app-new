@@ -945,6 +945,7 @@ import {
     Delete,
     QuestionFilled
 } from '@element-plus/icons-vue'
+import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { copyFile, remove } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -1443,6 +1444,11 @@ const performTemplateSubmit = async (
         utilsStore.showMessage(`视频${resp.bvid}提交成功 (模板: ${templateName})`, 'success')
         console.log(`视频${resp.bvid}提交成功 (模板: ${templateName})`, 'success')
 
+        // 稿件发布成功后删除模板中所有视频的原始本地文件
+        for (const video of template?.videos || []) {
+            await deleteOriginalVideoFile(video)
+        }
+
         await syncSeasonAfterSubmit(uid, resp, template)
 
         await new Promise(resolve => setTimeout(resolve, 500))
@@ -1658,6 +1664,9 @@ const processSeparateSubmitQueue = async (templateKey: string) => {
                 bvid: resp?.bvid ? String(resp.bvid) : '-'
             })
 
+            // 稿件发布成功后删除该视频的原始本地文件
+            await deleteOriginalVideoFile(readyVideo)
+
             const removeIndex = targetTemplate.videos.findIndex(v => v.id === readyVideo.id)
             if (removeIndex > -1) {
                 targetTemplate.videos.splice(removeIndex, 1)
@@ -1831,6 +1840,21 @@ const hasActiveUploadTasks = () => {
     )
 }
 
+// 删除已发布（稿件提交成功）视频的原始本地文件
+const deleteOriginalVideoFile = async (video: any) => {
+    const filePath = video?.original_file_path
+    if (!filePath) {
+        return
+    }
+    try {
+        await invoke('delete_file', { filePath })
+        console.log('已删除原始视频文件:', filePath)
+        video.original_file_path = ''
+    } catch (error) {
+        console.error('删除原始视频文件失败:', filePath, error)
+    }
+}
+
 // 将已完成任务的文件信息同步到模板配置
 const syncCompletedTasksToConfig = () => {
     for (const task of uploadStore.uploadQueue) {
@@ -1842,6 +1866,10 @@ const syncCompletedTasksToConfig = () => {
 
             const video = videos.find(v => v.id === task.video?.id)
             if (video && video.filename !== task.video?.filename) {
+                // 上传完成后 task.video.path 已被清空，先暂存原始本地路径，待稿件发布成功后删除
+                if (!video.original_file_path && video.path) {
+                    video.original_file_path = video.path
+                }
                 video.filename = task.video.filename
                 video.path = task.video.path
                 video.complete = true
@@ -2758,6 +2786,7 @@ const addVideoToCurrentForm = async (videoPath: string) => {
         title: videoNameWOExtension, // 去除扩展名作为标题
         desc: '',
         path: videoPath, // 保存完整路径
+        original_file_path: videoPath, // 原始文件路径，稿件发布成功后用于删除
         complete: false
     })
 

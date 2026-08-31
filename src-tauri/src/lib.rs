@@ -177,13 +177,13 @@ fn setup_logs(log_level: &str) -> Result<()> {
     // Tauri #9453提出启用tracing后traui应用有概率卡死
     // 在发行版本中尽量少的输出日志
 
-    #[cfg(debug_assertions)]
-    tracing_subscriber::registry()
-        .with(file_layer.with_filter(level))
-        .with(console_layer.with_filter(tracing_subscriber::filter::LevelFilter::TRACE))
-        .init();
+    // #[cfg(debug_assertions)]
+    // tracing_subscriber::registry()
+    //     .with(file_layer.with_filter(level))
+    //     .with(console_layer.with_filter(tracing_subscriber::filter::LevelFilter::TRACE))
+    //     .init();
 
-    #[cfg(not(debug_assertions))]
+    // #[cfg(not(debug_assertions))]
     tracing_subscriber::registry()
         .with(file_layer.with_filter(level))
         .with(console_layer.with_filter(level))
@@ -266,6 +266,7 @@ pub async fn run() {
             // 其他命令
             get_current_version,
             get_file_size,
+            delete_file,
             get_avatar_cache_dir,
             read_dir_recursive,
             list_cover_images,
