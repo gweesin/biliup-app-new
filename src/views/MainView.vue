@@ -150,6 +150,7 @@
                                     ref="lastPublishedBadgeRef"
                                     :uid="selectedUser?.uid ?? 0"
                                     :title="currentTemplateName"
+                                    @update:last-publish-time="lastPublishedTimeSec = $event"
                                 />
                             </div>
                             <div class="header-actions">
@@ -443,6 +444,7 @@
                                             :template-title="currentTemplateName"
                                             :disabled="templateLoading"
                                             :uid="selectedUser.uid"
+                                            :last-publish-time="lastPublishedTimeSec"
                                             @select-video="selectVideoWithTauri"
                                             @clear-all-videos="clearAllVideos"
                                             @remove-file="removeUploadedFile"
@@ -1000,6 +1002,8 @@ const currentVer = ref<string>('')
 const selectedUser = ref<any>(null)
 const currentTemplateName = ref<string>('')
 const lastPublishedBadgeRef = ref<InstanceType<typeof LastPublishedBadge> | null>(null)
+// LastPublishedBadge 计算出的上次发布时间（秒），传给 VideoList 作为排期起始基准
+const lastPublishedTimeSec = ref(0)
 const showNewTemplateDialog = ref(false)
 const showLoginDialog = ref(false)
 const showGlobalConfigDialog = ref(false)

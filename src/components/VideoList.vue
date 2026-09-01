@@ -303,12 +303,15 @@ interface Props {
     templateTitle?: string
     uid?: number
     disabled?: boolean
+    /** LastPublishedBadge 计算出的上次发布时间（Unix 秒），作为排期起始基准 */
+    lastPublishTime?: number
 }
 
 const props = withDefaults(defineProps<Props>(), {
     isDragOver: false,
     uploading: false,
-    disabled: false
+    disabled: false,
+    lastPublishTime: 0
 })
 
 // Emits
@@ -373,34 +376,32 @@ const mulberry32 = (seed: number) => {
 
 const pad2 = (n: number) => String(n).padStart(2, '0')
 
-// 按列表顺序计算某个位置的视频发布时间
-// 每天有 TIME_SLOTS.length 个时间点，每个时间点发布 videosPerTimeSlot 个视频，
-// 一天最多发布 perDay = videosPerTimeSlot * 4 个，超过则顺延到下一天
-// 同一时段内的每个视频在整点前后约45分钟窗口内取随机分钟并升序排列，
-// 保证整体从早到晚有序，同时时间点随机化（如 08:52、09:17）
-const getPublishTimeByIndex = (index: number): Date | null => {
+// 排期计算的起始基准（毫秒时间戳）
+// 取 手动选择的开始日期、LastPublishedBadge 计算出的上次发布时间、当前时间 三者的最大值，
+// 保证新排期一定晚于上次发布时间；当上次发布时间早于当前时间时，以当前时间为起始基准
+const effectiveStartMs = computed(() => {
+    // 兼容字符串（YYYY-MM-DD）与 Date 对象两种取值，取当天零点
     const startDateRaw = scheduleStartDate.value as unknown
-    if (!startDateRaw) return null
+    let startMs = 0
+    if (startDateRaw) {
+        const startDate: Date | string =
+            startDateRaw instanceof Date ? startDateRaw : String(startDateRaw)
+        const start = new Date(startDate instanceof Date ? startDate : `${startDate}T00:00:00`)
+        if (!isNaN(start.getTime())) startMs = start.getTime()
+    }
+    const lastPublishMs = (props.lastPublishTime || 0) * 1000
+    const nowMs = Date.now()
+    return Math.max(startMs, lastPublishMs, nowMs)
+})
 
-    // 兼容字符串（YYYY-MM-DD）与 Date 对象两种取值
-    const startDate: Date | string =
-        startDateRaw instanceof Date ? startDateRaw : String(startDateRaw)
-
-    const perSlot = getVideosPerTimeSlot()
-    const perDay = perSlot * TIME_SLOTS.length
-    const dayOffset = Math.floor(index / perDay)
-    const slotIndex = Math.min(Math.floor((index % perDay) / perSlot), TIME_SLOTS.length - 1)
-    const posInSlot = index % perSlot
-
-    const base = new Date(startDate instanceof Date ? startDate : `${startDate}T00:00:00`)
-    if (isNaN(base.getTime())) return null
-    base.setDate(base.getDate() + dayOffset)
-    const year = base.getFullYear()
-    const month = base.getMonth() + 1
-    const day = base.getDate()
+// 计算某个（日期, 时段, 位置）对应的具体发布时间
+const getSlotTime = (day: Date, perSlot: number, slotIndex: number, posInSlot: number): Date => {
+    const year = day.getFullYear()
+    const month = day.getMonth() + 1
+    const dayOfMonth = day.getDate()
 
     // 以 (日期, 时段, 每时段数量) 为种子，保证切换数量时时间也会重新随机生成
-    const rand = mulberry32(hashSeed(`${year}-${month}-${day}-${slotIndex}-${perSlot}`))
+    const rand = mulberry32(hashSeed(`${year}-${month}-${dayOfMonth}-${slotIndex}-${perSlot}`))
     const offsets: number[] = []
     for (let i = 0; i < perSlot; i++) {
         offsets.push(Math.floor(rand() * 90) - 45) // -45 ~ +44 分钟
@@ -411,8 +412,44 @@ const getPublishTimeByIndex = (index: number): Date | null => {
     const hour = Math.floor(totalMinutes / 60)
     const minute = totalMinutes % 60
 
-    base.setHours(hour, minute, 0, 0)
-    return base
+    const date = new Date(day)
+    date.setHours(hour, minute, 0, 0)
+    return date
+}
+
+// 按列表顺序计算某个位置的视频发布时间
+// 以 effectiveStartMs 为起点：起始日当天早于/等于基准时间的时段全部跳过，
+// 之后的视频按 每天 TIME_SLOTS.length 个时间点、每个时间点发布 videosPerTimeSlot 个 顺延排布，
+// 保证整体从早到晚有序，同时时间点随机化（如 08:52、09:17）
+const getPublishTimeByIndex = (index: number): Date | null => {
+    const baseMs = effectiveStartMs.value
+    if (!baseMs || isNaN(baseMs)) return null
+
+    const perSlot = getVideosPerTimeSlot()
+    const perDay = perSlot * TIME_SLOTS.length
+
+    // 基准时间的当天零点作为起始日
+    const anchorDay = new Date(baseMs)
+    anchorDay.setHours(0, 0, 0, 0)
+
+    // 起始日当天早于/等于基准时间的时段数量，全部跳过，保证发布时间晚于基准时间
+    let shift = 0
+    for (let slotIndex = 0; slotIndex < TIME_SLOTS.length; slotIndex++) {
+        for (let posInSlot = 0; posInSlot < perSlot; posInSlot++) {
+            if (getSlotTime(anchorDay, perSlot, slotIndex, posInSlot).getTime() <= baseMs) {
+                shift++
+            }
+        }
+    }
+
+    const virtualIndex = index + shift
+    const dayOffset = Math.floor(virtualIndex / perDay)
+    const slotIndex = Math.min(Math.floor((virtualIndex % perDay) / perSlot), TIME_SLOTS.length - 1)
+    const posInSlot = virtualIndex % perSlot
+
+    const targetDay = new Date(anchorDay)
+    targetDay.setDate(targetDay.getDate() + dayOffset)
+    return getSlotTime(targetDay, perSlot, slotIndex, posInSlot)
 }
 
 // 格式化发布时间显示文本（MM-DD HH:mm）

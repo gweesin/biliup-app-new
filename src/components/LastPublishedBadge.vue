@@ -14,6 +14,11 @@ const props = withDefaults(
     }
 )
 
+// 上次发布时间（Unix 秒）变化时通知父组件，供排期起始基准使用
+const emit = defineEmits<{
+    'update:lastPublishTime': [timeSec: number]
+}>()
+
 const utilsStore = useUtilsStore()
 
 // 已发布稿件列表（用于展示模板对应视频的发布时间）
@@ -90,6 +95,11 @@ const refresh = () => {
         fetchPublishedArchives(props.uid)
     }
 }
+
+// 上次发布时间变化时通知父组件（Unix 秒），无匹配时为 0
+watch(lastPublishedInfo, info => {
+    emit('update:lastPublishTime', info?.time ?? 0)
+}, { immediate: true })
 
 defineExpose<{ refresh: () => void }>({ refresh })
 
