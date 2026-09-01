@@ -974,20 +974,7 @@ import DescView from '../components/DescView.vue'
 import SubmitStatsPage from '../components/SubmitStatsPage.vue'
 import CoverUploader from '../components/CoverUploader.vue'
 import LastPublishedBadge from '../components/LastPublishedBadge.vue'
-
-type SubmitModeText = '单稿件' | '多稿件'
-
-interface SubmitStatsRecord {
-    time: string
-    user: string
-    mode: SubmitModeText
-    templateName: string
-    status: 'success' | 'failed'
-    statusText: '成功' | '失败'
-    bvid: string
-    videoName: string
-    error: string
-}
+import type { SubmitStats, SubmitStatsInput, SeparateSubmitState } from '../types/submit'
 
 const authStore = useAuthStore()
 const userConfigStore = useUserConfigStore()
@@ -1034,27 +1021,10 @@ const separateSubmittingRecord = ref<Record<string, boolean>>({})
 const separateSubmitProcessingKeys = ref<Set<string>>(new Set())
 const separateSubmitCancelledKeys = ref<Set<string>>(new Set())
 
-interface SeparateSubmitState {
-    uid: number
-    templateName: string
-    attemptedVideoIds: Set<string>
-    successCount: number
-    failCount: number
-    totalCount: number
-    successBvids: string[]
-    failedVideoNames: string[]
-}
-
 const separateSubmitStateRecord = ref<Record<string, SeparateSubmitState>>({})
 const submitDispatchRoundRobinCursor = ref(0)
 
-const submitStats = ref<{
-    startedAt: string
-    totalCount: number
-    successCount: number
-    failCount: number
-    records: SubmitStatsRecord[]
-}>({
+const submitStats = ref<SubmitStats>({
     startedAt: new Date().toLocaleString(),
     totalCount: 0,
     successCount: 0,
@@ -1062,15 +1032,7 @@ const submitStats = ref<{
     records: []
 })
 
-const recordSubmitStats = (record: {
-    user: string
-    mode: SubmitModeText
-    templateName: string
-    status: 'success' | 'failed'
-    bvid?: string
-    videoName?: string
-    error?: unknown
-}) => {
+const recordSubmitStats = (record: SubmitStatsInput) => {
     submitStats.value.totalCount += 1
     if (record.status === 'success') {
         submitStats.value.successCount += 1

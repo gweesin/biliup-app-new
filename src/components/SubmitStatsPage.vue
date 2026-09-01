@@ -31,27 +31,11 @@
 </template>
 
 <script setup lang="ts">
-interface SubmitStatsRecord {
-    time: string
-    user: string
-    mode: '单稿件' | '多稿件'
-    templateName: string
-    status: 'success' | 'failed'
-    statusText: '成功' | '失败'
-    bvid: string
-    videoName: string
-    error: string
-}
+import type { SubmitStats } from '../types/submit'
 
 defineProps<{
     modelValue: boolean
-    stats: {
-        startedAt: string
-        totalCount: number
-        successCount: number
-        failCount: number
-        records: SubmitStatsRecord[]
-    }
+    stats: SubmitStats
 }>()
 
 const emit = defineEmits<{
