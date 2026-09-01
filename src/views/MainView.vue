@@ -947,11 +947,15 @@ import {
     Delete,
     QuestionFilled
 } from '@element-plus/icons-vue'
-import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { copyFile, remove } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { listen } from '@tauri-apps/api/event'
+import {
+    deleteOriginalVideoFile,
+    deleteOriginalVideoFiles,
+    syncCompletedTasksToConfig
+} from '../utils/videoFileCleanup'
 import LoginView from '../components/LoginView.vue'
 import TemplateSidebar from '../components/TemplateSidebar.vue'
 import UserConfig from '../components/UserConfig.vue'
@@ -1449,9 +1453,7 @@ const performTemplateSubmit = async (
         console.log(`视频${resp.bvid}提交成功 (模板: ${templateName})`, 'success')
 
         // 稿件发布成功后删除模板中所有视频的原始本地文件
-        for (const video of template?.videos || []) {
-            await deleteOriginalVideoFile(video)
-        }
+        await deleteOriginalVideoFiles(template?.videos)
 
         await syncSeasonAfterSubmit(uid, resp, template)
 
@@ -1844,43 +1846,9 @@ const hasActiveUploadTasks = () => {
     )
 }
 
-// 删除已发布（稿件提交成功）视频的原始本地文件
-const deleteOriginalVideoFile = async (video: any) => {
-    const filePath = video?.original_file_path
-    if (!filePath) {
-        return
-    }
-    try {
-        await invoke('delete_file', { filePath })
-        console.log('已删除原始视频文件:', filePath)
-        video.original_file_path = ''
-    } catch (error) {
-        console.error('删除原始视频文件失败:', filePath, error)
-    }
-}
-
 // 将已完成任务的文件信息同步到模板配置
-const syncCompletedTasksToConfig = () => {
-    for (const task of uploadStore.uploadQueue) {
-        if (task.status === 'Completed') {
-            const templateName = task.template
-            const uid = task.user.uid
-            const videos =
-                userConfigStore.configRoot?.config[uid]?.templates[templateName]?.videos || []
-
-            const video = videos.find(v => v.id === task.video?.id)
-            if (video && video.filename !== task.video?.filename) {
-                // 上传完成后 task.video.path 已被清空，先暂存原始本地路径，待稿件发布成功后删除
-                if (!video.original_file_path && video.path) {
-                    video.original_file_path = video.path
-                }
-                video.filename = task.video.filename
-                video.path = task.video.path
-                video.complete = true
-                video.finished_at = task.finished_at
-            }
-        }
-    }
+const syncCompletedTasksFromQueue = () => {
+    return syncCompletedTasksToConfig(userConfigStore.configRoot, uploadStore.uploadQueue)
 }
 
 const currentTemplate = computed(() => {
@@ -2304,7 +2272,7 @@ const initializeData = async () => {
                     queuePolling = true
                     try {
                         await uploadStore.getUploadQueue()
-                        syncCompletedTasksToConfig()
+                        syncCompletedTasksFromQueue()
                     } catch (error) {
                         console.error('轮询上传队列失败:', error)
                     } finally {
