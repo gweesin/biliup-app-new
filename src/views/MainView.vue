@@ -930,10 +930,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, nextTick, watch, onUnmounted } from 'vue'
-import { v4 as uuidv4 } from 'uuid'
+import { ref, onMounted, computed, watch, onUnmounted } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import { useUserConfigStore, TemplateConfig } from '../stores/user_config'
+import { useUserConfigStore } from '../stores/user_config'
 import { useUtilsStore } from '../stores/utils'
 import { useUploadStore } from '../stores/upload'
 import { ElMessageBox } from 'element-plus'
@@ -947,15 +946,17 @@ import {
     Delete,
     QuestionFilled
 } from '@element-plus/icons-vue'
-import { open, save } from '@tauri-apps/plugin-dialog'
+import { save } from '@tauri-apps/plugin-dialog'
 import { copyFile, remove } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { listen } from '@tauri-apps/api/event'
-import {
-    deleteOriginalVideoFile,
-    deleteOriginalVideoFiles,
-    syncCompletedTasksToConfig
-} from '../utils/videoFileCleanup'
+import { hasTemplateUnsavedChanges } from '../utils/templateDiff'
+import { useCardCollapse } from '../composables/useCardCollapse'
+import { useCardContent } from '../composables/useCardContent'
+import { useTemplateSelection } from '../composables/useTemplateSelection'
+import { useVideoImport } from '../composables/useVideoImport'
+import { useTemplateManager } from '../composables/useTemplateManager'
+import { useInteractiveDialogs } from '../composables/useInteractiveDialogs'
+import { useUserActions } from '../composables/useUserActions'
 import LoginView from '../components/LoginView.vue'
 import TemplateSidebar from '../components/TemplateSidebar.vue'
 import UserConfig from '../components/UserConfig.vue'
@@ -974,7 +975,8 @@ import DescView from '../components/DescView.vue'
 import SubmitStatsPage from '../components/SubmitStatsPage.vue'
 import CoverUploader from '../components/CoverUploader.vue'
 import LastPublishedBadge from '../components/LastPublishedBadge.vue'
-import type { SubmitStats, SubmitStatsInput, SeparateSubmitState } from '../types/submit'
+import type { SubmitStats, SubmitStatsInput } from '../types/submit'
+import { useSeparateSubmit } from '../composables/useSeparateSubmit'
 
 const authStore = useAuthStore()
 const userConfigStore = useUserConfigStore()
@@ -984,8 +986,6 @@ const utilsStore = useUtilsStore()
 // 计算属性
 const loginUsers = computed(() => authStore.loginUsers)
 const userTemplates = computed(() => userConfigStore.userTemplates)
-const typeList = computed(() => utilsStore.typelist)
-const typeListV2 = computed(() => utilsStore.typeListV2)
 
 const currentVer = ref<string>('')
 
@@ -1006,24 +1006,11 @@ const templateLoading = ref(false) // 模板加载状态锁
 
 // 视频状态对话框
 const showVideoStatusDialog = ref(false)
-const interactiveConfirmShown = ref<Record<string, boolean>>({})
-const interactiveDialogOpening = ref(false)
-const onlySelfDialogOpening = ref(false)
 
 // 组件引用
 const newTemplateRef = ref<InstanceType<typeof NewTemplete> | null>(null)
 const tagViewRef = ref<InstanceType<typeof TagView> | null>(null)
 const seasonViewRef = ref<InstanceType<typeof SeasonView> | null>(null)
-// 自动提交状态记录 - 记录每个模板的自动提交状态
-const autoSubmittingRecord = ref<Record<string, boolean>>({})
-const autoSubmitProcessingKeys = ref<Set<string>>(new Set())
-const separateSubmittingRecord = ref<Record<string, boolean>>({})
-const separateSubmitProcessingKeys = ref<Set<string>>(new Set())
-const separateSubmitCancelledKeys = ref<Set<string>>(new Set())
-
-const separateSubmitStateRecord = ref<Record<string, SeparateSubmitState>>({})
-const submitDispatchRoundRobinCursor = ref(0)
-
 const submitStats = ref<SubmitStats>({
     startedAt: new Date().toLocaleString(),
     totalCount: 0,
@@ -1062,756 +1049,48 @@ const clearSubmitStats = () => {
     utilsStore.showMessage('提交统计内存已清空', 'success')
 }
 
-const currentSeparateTemplateKey = computed(() => {
-    if (!selectedUser.value || !currentTemplateName.value) {
-        return ''
-    }
-
-    return getTemplateKey(selectedUser.value.uid, currentTemplateName.value)
+const {
+    autoSubmittingRecord,
+    separateSubmittingRecord,
+    lastSubmit,
+    separateSubmitting,
+    separateSubmitUploadedCount,
+    separateSubmitCompletedCount,
+    separateSubmitTotalCount,
+    getCurrentAutoSubmitting,
+    hasAnyAutoSubmitting,
+    hasAnySeparateSubmitting,
+    setAutoSubmitting,
+    resetAllSubmitStates,
+    parseTemplateKey,
+    checkAutoSubmitAll,
+    performTemplateSubmit,
+    stopSeparateSubmit,
+    submitTemplateAsSeparatePosts
+} = useSeparateSubmit({
+    selectedUser,
+    currentTemplateName,
+    submitting,
+    lastPublishedBadgeRef,
+    newTemplateRef,
+    loginUsers,
+    recordSubmitStats,
+    autoStartWaitingTasks: () => autoStartWaitingTasks(),
+    reloadTemplateFromAV: (uid, aid) => reloadTemplateFromAV(uid, aid)
 })
 
-const separateSubmitting = computed(() => {
-    const templateKey = currentSeparateTemplateKey.value
-    if (!templateKey) {
-        return false
-    }
-
-    return Boolean(separateSubmittingRecord.value[templateKey])
-})
-
-const getOrCreateSeparateSubmitState = (uid: number, templateName: string): SeparateSubmitState => {
-    const templateKey = getTemplateKey(uid, templateName)
-    const existing = separateSubmitStateRecord.value[templateKey]
-    if (existing) {
-        return existing
-    }
-
-    const created: SeparateSubmitState = {
-        uid,
-        templateName,
-        attemptedVideoIds: new Set<string>(),
-        successCount: 0,
-        failCount: 0,
-        totalCount: 0,
-        successBvids: [],
-        failedVideoNames: []
-    }
-
-    separateSubmitStateRecord.value[templateKey] = created
-    return created
-}
-
-const clearSeparateSubmitStateByKey = (templateKey: string) => {
-    delete separateSubmittingRecord.value[templateKey]
-    separateSubmitProcessingKeys.value.delete(templateKey)
-    separateSubmitCancelledKeys.value.delete(templateKey)
-    delete separateSubmitStateRecord.value[templateKey]
-}
-
-const clearAllSeparateSubmitStates = () => {
-    separateSubmittingRecord.value = {}
-    separateSubmitProcessingKeys.value.clear()
-    separateSubmitCancelledKeys.value.clear()
-    separateSubmitStateRecord.value = {}
-}
-
-const separateSubmitUploadedCount = computed(() => {
-    const templateKey = currentSeparateTemplateKey.value
-    if (!templateKey || !separateSubmittingRecord.value[templateKey]) {
-        return 0
-    }
-
-    const submitState = separateSubmitStateRecord.value[templateKey]
-    if (!submitState) {
-        return 0
-    }
-
-    const { uid, templateName } = submitState
-    const targetTemplate = userConfigStore.configRoot?.config?.[uid]?.templates?.[templateName]
-    const videos = targetTemplate?.videos || []
-    let readyUploadedCount = 0
-
-    for (const video of videos) {
-        if (video.complete && video.path === '' && !submitState.attemptedVideoIds.has(video.id)) {
-            readyUploadedCount++
-        }
-    }
-
-    const attemptedCount = submitState.attemptedVideoIds.size
-    return Math.min(submitState.totalCount, attemptedCount + readyUploadedCount)
-})
-
-const separateSubmitCompletedCount = computed(() => {
-    const templateKey = currentSeparateTemplateKey.value
-    if (!templateKey) {
-        return 0
-    }
-
-    const submitState = separateSubmitStateRecord.value[templateKey]
-    if (!submitState) {
-        return 0
-    }
-
-    return submitState.successCount + submitState.failCount
-})
-
-const separateSubmitTotalCount = computed(() => {
-    const templateKey = currentSeparateTemplateKey.value
-    if (!templateKey) {
-        return 0
-    }
-
-    const submitState = separateSubmitStateRecord.value[templateKey]
-    if (!submitState) {
-        return 0
-    }
-
-    return submitState.totalCount
-})
-
-// 生成模板键名
-const getTemplateKey = (uid: number, templateName: string) => `${uid}-${templateName}`
-
-// 解析模板键名，支持模板名包含 "-"
-const parseTemplateKey = (templateKey: string): { uid: number; templateName: string } | null => {
-    const separatorIndex = templateKey.indexOf('-')
-    if (separatorIndex <= 0) {
-        return null
-    }
-
-    const uid = Number.parseInt(templateKey.slice(0, separatorIndex), 10)
-    const templateName = templateKey.slice(separatorIndex + 1)
-
-    if (Number.isNaN(uid) || !templateName) {
-        return null
-    }
-
-    return { uid, templateName }
-}
-
-// 获取当前模板的自动提交状态
-const getCurrentAutoSubmitting = computed(() => {
-    if (!selectedUser.value || !currentTemplateName.value) return false
-    const key = getTemplateKey(selectedUser.value.uid, currentTemplateName.value)
-    return autoSubmittingRecord.value[key] || false
-})
-
-// 设置模板的自动提交状态
-const setAutoSubmitting = (uid: number, templateName: string, status: boolean) => {
-    const key = getTemplateKey(uid, templateName)
-    if (status) {
-        autoSubmittingRecord.value[key] = true
-    } else {
-        delete autoSubmittingRecord.value[key]
-    }
-}
-
-const getSubmitUserLabel = (uid: number) => {
-    const user = loginUsers.value.find(item => item.uid === uid)
-    if (!user) {
-        return '未知用户: ' + uid
-    }
-    return user.username
-}
-
-const getSeparateSubmitCancelKey = (uid: number, templateName: string) => {
-    return `separate:${uid}:${templateName}`
-}
-
-// 检查是否有任何模板在自动提交
-const hasAnyAutoSubmitting = computed(() => {
-    return Object.keys(autoSubmittingRecord.value).length > 0
-})
-
-const hasAnySeparateSubmitting = computed(() => {
-    return Object.keys(separateSubmittingRecord.value).length > 0
-})
-
-const getOrderedDispatchTemplateKeys = (templateKeys: string[]) => {
-    if (templateKeys.length <= 1) {
-        return templateKeys
-    }
-
-    const sortedKeys = [...templateKeys].sort()
-    const startIndex = submitDispatchRoundRobinCursor.value % sortedKeys.length
-    const head = sortedKeys.slice(startIndex)
-    const tail = sortedKeys.slice(0, startIndex)
-    return [...head, ...tail]
-}
-
-// 全局自动提交检查函数
-const checkAutoSubmitAll = async () => {
-    const templateKeys = Array.from(
-        new Set([
-            ...Object.keys(autoSubmittingRecord.value),
-            ...Object.keys(separateSubmittingRecord.value)
-        ])
-    )
-
-    if (templateKeys.length === 0) {
-        return
-    }
-
-    const orderedTemplateKeys = getOrderedDispatchTemplateKeys(templateKeys)
-    submitDispatchRoundRobinCursor.value =
-        (submitDispatchRoundRobinCursor.value + 1) % orderedTemplateKeys.length
-
-    for (const templateKey of orderedTemplateKeys) {
-        const parsed = parseTemplateKey(templateKey)
-        if (!parsed) continue
-
-        const { uid, templateName } = parsed
-
-        // 获取用户和模板配置
-        const user = loginUsers.value.find(u => u.uid === uid)
-        if (!user || !userConfigStore.configRoot?.config[uid]?.templates[templateName]) {
-            // 如果用户或模板不存在，清除自动提交状态
-            setAutoSubmitting(uid, templateName, false)
-            clearSeparateSubmitStateByKey(templateKey)
-            continue
-        }
-
-        if (separateSubmittingRecord.value[templateKey]) {
-            await processSeparateSubmitQueue(templateKey)
-        }
-
-        if (autoSubmitProcessingKeys.value.has(templateKey)) {
-            continue
-        }
-
-        const template = userConfigStore.configRoot.config[uid].templates[templateName]
-
-        // 检查是否所有文件都已上传完成
-        if (template.videos && template.videos.length > 0) {
-            const allUploaded = template.videos.every(video => video.complete && video.path === '')
-
-            if (allUploaded && autoSubmittingRecord.value[templateKey]) {
-                // 文件已全部上传完成，执行提交
-                autoSubmitProcessingKeys.value.add(templateKey)
-                setAutoSubmitting(uid, templateName, false)
-                try {
-                    await performTemplateSubmit(uid, templateName, template, { showLoading: false })
-                } catch (error) {
-                    console.error(`模板 ${templateKey} 自动提交失败:`, error)
-                } finally {
-                    autoSubmitProcessingKeys.value.delete(templateKey)
-                }
-            }
-        } else {
-            // 没有视频文件，清除自动提交状态
-            setAutoSubmitting(uid, templateName, false)
-        }
-    }
-}
-
-const syncSeasonAfterSubmit = async (uid: number, resp: any, template: any) => {
-    if (!(resp && resp.aid && utilsStore.hasSeason)) {
-        return
-    }
-
-    const isNewSubmission = !template?.aid
-    const configuredSeasonId = Number(template?.season_id || 0)
-    // 新增稿件未设置合集时，不触发合集提交
-    if (isNewSubmission && configuredSeasonId <= 0) {
-        return
-    }
-
-    try {
-        const old_season_id = await utilsStore.getVideoSeason(uid, resp.aid)
-        let add = old_season_id && old_season_id !== 0 ? false : true
-
-        if (template && old_season_id !== template.season_id && template.videos[0]?.cid) {
-            const new_season_id = template.season_id || 0
-            const new_section_id = template.section_id || 0
-            await utilsStore.switchSeason(
-                uid,
-                resp.aid,
-                template.videos[0]?.cid,
-                new_season_id,
-                new_section_id,
-                template.title,
-                add
-            )
-
-            const season_title =
-                utilsStore.seasonlist.find((s: any) => s.season_id === template.season_id)?.title ||
-                template.season_id
-            utilsStore.showMessage(`视频${resp.bvid}加入合集${season_title}`, 'success')
-            console.log(`视频${resp.bvid}加入合集${season_title}`, 'success')
-        }
-    } catch (error) {
-        console.error('设置合集失败: ', error)
-        utilsStore.showMessage(`设置合集失败: ${error}`, 'error')
-    }
-}
-
-const handleAutoEditAfterSubmit = async (
-    uid: number,
-    templateName: string,
-    template: any,
-    resp: any
-) => {
-    if (!template.aid) {
-        const userConfig = userConfigStore.configRoot?.config[uid]
-        if (userConfig && userConfig.auto_edit && newTemplateRef.value) {
-            // 新增稿件且auto_edit开启，创建编辑模板
-            await newTemplateRef.value.createTemplateFromBV(uid, resp.bvid, resp.bvid, true)
-            utilsStore.showMessage('从BV号创建模板成功', 'success')
-        }
-    } else {
-        if (selectedUser.value?.uid === uid && currentTemplateName.value === templateName) {
-            await reloadTemplateFromAV(uid, template.aid)
-        }
-    }
-}
-
-const collectFailedVideoNames = (template: any): string[] => {
-    return Array.from(
-        new Set(
-            (template?.videos || [])
-                .map((video: any) => (video?.title || '').trim() || video?.id)
-                .filter((name: any): name is string => Boolean(name))
-        )
-    )
-}
-
-// 执行模板提交
-const performTemplateSubmit = async (
-    uid: number,
-    templateName: string,
-    template: any,
-    options?: { showLoading?: boolean }
-) => {
-    const user = loginUsers.value.find(u => u.uid === uid)
-    if (!user) throw new Error('用户不存在')
-
-    const showLoading = options?.showLoading ?? true
-    if (showLoading) {
-        submitting.value = true
-    }
-
-    try {
-        const resp = (await uploadStore.submitTemplate(uid, template)) as any
-        const bvid = resp?.bvid ? String(resp.bvid) : '-'
-        recordSubmitStats({
-            user: user.username,
-            mode: '单稿件',
-            templateName,
-            status: 'success',
-            bvid
-        })
-
-        // 更新最后提交时间（只对当前模板）
-        if (selectedUser.value?.uid === uid && currentTemplateName.value === templateName) {
-            lastSubmit.value = new Date().toLocaleString()
-        }
-
-        // 投稿成功后延时刷新已发布稿件列表，更新发布时间展示
-        if (selectedUser.value?.uid === uid) {
-            setTimeout(() => lastPublishedBadgeRef.value?.refresh(), 1500)
-        }
-
-        utilsStore.showMessage(`视频${resp.bvid}提交成功 (模板: ${templateName})`, 'success')
-        console.log(`视频${resp.bvid}提交成功 (模板: ${templateName})`, 'success')
-
-        // 稿件发布成功后删除模板中所有视频的原始本地文件
-        await deleteOriginalVideoFiles(template?.videos)
-
-        await syncSeasonAfterSubmit(uid, resp, template)
-
-        await new Promise(resolve => setTimeout(resolve, 500))
-
-        try {
-            await handleAutoEditAfterSubmit(uid, templateName, template, resp)
-        } catch (error) {
-            utilsStore.showMessage(`${error}`, 'error')
-        }
-    } catch (error) {
-        const failedVideoNames = collectFailedVideoNames(template)
-        for (const videoName of failedVideoNames) {
-            recordSubmitStats({
-                user: user.username,
-                mode: '单稿件',
-                templateName,
-                status: 'failed',
-                videoName,
-                error
-            })
-        }
-
-        console.error('模板提交失败:', error)
-        utilsStore.showMessage(`模板提交失败: ${error}`, 'error')
-    } finally {
-        if (showLoading) {
-            submitting.value = false
-        }
-    }
-}
-
-const stopSeparateSubmit = (templateKey?: string) => {
-    const targetKey = templateKey || currentSeparateTemplateKey.value
-    if (!targetKey || !separateSubmittingRecord.value[targetKey]) {
-        return
-    }
-
-    const submitState = separateSubmitStateRecord.value[targetKey]
-    if (!submitState) {
-        clearSeparateSubmitStateByKey(targetKey)
-        return
-    }
-
-    const cancelKey = getSeparateSubmitCancelKey(submitState.uid, submitState.templateName)
-    uploadStore.cancelPendingSubmitByKey(cancelKey)
-
-    separateSubmitCancelledKeys.value.add(targetKey)
-    delete separateSubmittingRecord.value[targetKey]
-    utilsStore.showMessage('已停止多稿件提交，当前进行中的提交结束后将退出', 'info')
-
-    if (!separateSubmitProcessingKeys.value.has(targetKey)) {
-        void finalizeSeparateSubmitMode(targetKey)
-    }
-}
-
-const finalizeSeparateSubmitMode = async (templateKey: string) => {
-    const submitState = separateSubmitStateRecord.value[templateKey]
-    if (!submitState) {
-        clearSeparateSubmitStateByKey(templateKey)
-        return
-    }
-
-    const wasCancelled = separateSubmitCancelledKeys.value.has(templateKey)
-    if (wasCancelled) {
-        const successCount = submitState.successCount
-        const failCount = submitState.failCount
-        if (successCount > 0 || failCount > 0) {
-            utilsStore.showMessage(
-                `多稿件提交已停止，已成功 ${successCount} 个，失败 ${failCount} 个`,
-                'warning'
-            )
-        }
-        clearSeparateSubmitStateByKey(templateKey)
-        return
-    }
-
-    const targetTemplate =
-        userConfigStore.configRoot?.config?.[submitState.uid]?.templates?.[submitState.templateName]
-    const remainingVideos = targetTemplate?.videos || []
-    const hasUploadingVideos = remainingVideos.some(video => !(video.complete && video.path === ''))
-    const hasPendingReadyVideos = remainingVideos.some(
-        video => video.complete && video.path === '' && !submitState.attemptedVideoIds.has(video.id)
-    )
-
-    // 模板被删光视频后应及时释放状态，避免按钮一直显示“停止多稿件提交”
-    if (submitState.totalCount > 0 && remainingVideos.length === 0) {
-        const successCount = submitState.successCount
-        const failCount = submitState.failCount
-
-        if (failCount === 0) {
-            utilsStore.showMessage(`多稿件提交完成，共成功 ${successCount} 个`, 'success')
-        } else {
-            utilsStore.showMessage(
-                `多稿件提交完成，成功 ${successCount} 个，失败 ${failCount} 个`,
-                'warning'
-            )
-        }
-
-        clearSeparateSubmitStateByKey(templateKey)
-        return
-    }
-
-    if (hasUploadingVideos) {
-        return
-    }
-
-    if (hasPendingReadyVideos) {
-        void processSeparateSubmitQueue(templateKey)
-        return
-    }
-
-    const successCount = submitState.successCount
-    const failCount = submitState.failCount
-
-    if (successCount > 0 || failCount > 0) {
-        if (
-            selectedUser.value?.uid === submitState.uid &&
-            currentTemplateName.value === submitState.templateName
-        ) {
-            lastSubmit.value = new Date().toLocaleString()
-        }
-        // 投稿完成后延时刷新已发布稿件列表，更新发布时间展示
-        if (successCount > 0) {
-            setTimeout(() => lastPublishedBadgeRef.value?.refresh(), 1500)
-        }
-    }
-
-    if (failCount === 0) {
-        utilsStore.showMessage(`多稿件提交完成，共成功 ${successCount} 个`, 'success')
-    } else {
-        utilsStore.showMessage(
-            `多稿件提交完成，成功 ${successCount} 个，失败 ${failCount} 个`,
-            'warning'
-        )
-    }
-
-    clearSeparateSubmitStateByKey(templateKey)
-}
-
-const processSeparateSubmitQueue = async (templateKey: string) => {
-    if (
-        !separateSubmittingRecord.value[templateKey] ||
-        separateSubmitProcessingKeys.value.has(templateKey)
-    ) {
-        return
-    }
-
-    const submitState = separateSubmitStateRecord.value[templateKey]
-    if (!submitState) {
-        clearSeparateSubmitStateByKey(templateKey)
-        return
-    }
-
-    separateSubmitProcessingKeys.value.add(templateKey)
-    try {
-        if (
-            !separateSubmittingRecord.value[templateKey] ||
-            separateSubmitCancelledKeys.value.has(templateKey)
-        ) {
-            return
-        }
-
-        const { uid, templateName } = submitState
-        const targetTemplate = userConfigStore.configRoot?.config?.[uid]?.templates?.[templateName]
-        if (!targetTemplate) {
-            clearSeparateSubmitStateByKey(templateKey)
-            utilsStore.showMessage('多稿件提交目标模板不存在，已停止提交', 'warning')
-            return
-        }
-
-        const readyVideo = (targetTemplate.videos || []).find(
-            video =>
-                video.complete && video.path === '' && !submitState.attemptedVideoIds.has(video.id)
-        )
-
-        if (!readyVideo) {
-            return
-        }
-
-        submitState.attemptedVideoIds.add(readyVideo.id)
-        const singleVideo = JSON.parse(JSON.stringify(readyVideo))
-        const singleTemplate = JSON.parse(JSON.stringify(targetTemplate))
-        const fallbackTitle = singleTemplate.title
-
-        singleTemplate.aid = undefined
-        singleTemplate.videos = [singleVideo]
-        singleTemplate.title = (singleVideo.title || '').trim() || fallbackTitle
-
-        // 如果视频有封面，则使用视频封面，否则使用模板封面
-        if(singleVideo.cover) {
-            singleTemplate.cover = singleVideo.cover
-        }
-
-        // 如果视频有定时发布时间，则使用视频定时发布时间，否则使用模板定时发布时间
-        if(singleVideo.dtime) {
-            singleTemplate.dtime = singleVideo.dtime
-        }
-        const cancelKey = getSeparateSubmitCancelKey(uid, templateName)
-
-        try {
-            const resp = (await uploadStore.submitTemplate(uid, singleTemplate, {
-                cancelKey
-            })) as any
-            submitState.successCount++
-            if (resp?.bvid) {
-                submitState.successBvids.push(resp.bvid)
-            }
-            recordSubmitStats({
-                user: getSubmitUserLabel(uid),
-                mode: '多稿件',
-                templateName,
-                status: 'success',
-                bvid: resp?.bvid ? String(resp.bvid) : '-'
-            })
-
-            // 稿件发布成功后删除该视频的原始本地文件
-            await deleteOriginalVideoFile(readyVideo)
-
-            const removeIndex = targetTemplate.videos.findIndex(v => v.id === readyVideo.id)
-            if (removeIndex > -1) {
-                targetTemplate.videos.splice(removeIndex, 1)
-            }
-
-            try {
-                await syncSeasonAfterSubmit(uid, resp, singleTemplate)
-                await handleAutoEditAfterSubmit(uid, templateName, singleTemplate, resp)
-            } catch (postError) {
-                console.error('提交后处理失败:', postError)
-                utilsStore.showMessage(`提交后处理失败: ${postError}`, 'error')
-            }
-        } catch (error) {
-            if (
-                uploadStore.isSubmitCancelledError(error) ||
-                separateSubmitCancelledKeys.value.has(templateKey)
-            ) {
-                return
-            }
-
-            submitState.failCount++
-            const videoTitle = (readyVideo.title || '').trim() || readyVideo.id
-            submitState.failedVideoNames.push(videoTitle)
-            recordSubmitStats({
-                user: getSubmitUserLabel(uid),
-                mode: '多稿件',
-                templateName,
-                status: 'failed',
-                videoName: videoTitle,
-                error
-            })
-            utilsStore.showMessage(`多稿件提交失败（${videoTitle}）: ${error}`, 'error')
-            console.error('多稿件模式提交失败: ', error)
-        }
-    } finally {
-        separateSubmitProcessingKeys.value.delete(templateKey)
-        void finalizeSeparateSubmitMode(templateKey)
-    }
-}
-
-const submitTemplateAsSeparatePosts = async (options?: {
-    skipConfirm?: boolean
-    autoTrigger?: boolean
-    uid?: number
-    templateName?: string
-}) => {
-    const submitUid = options?.uid ?? selectedUser.value?.uid
-    const submitTemplateName = options?.templateName ?? currentTemplateName.value
-
-    if (!submitUid || !submitTemplateName) {
-        utilsStore.showMessage('请先选择模板', 'error')
-        return
-    }
-
-    const targetTemplate =
-        userConfigStore.configRoot?.config?.[submitUid]?.templates?.[submitTemplateName]
-    if (!targetTemplate) {
-        utilsStore.showMessage('目标模板不存在', 'error')
-        return
-    }
-
-    const templateKey = getTemplateKey(submitUid, submitTemplateName)
-    if (separateSubmittingRecord.value[templateKey]) {
-        if (options?.autoTrigger) {
-            await processSeparateSubmitQueue(templateKey)
-        }
-        return
-    }
-
-    if (targetTemplate.aid) {
-        utilsStore.showMessage('仅新增稿件支持此功能', 'warning')
-        return
-    }
-
-    const sourceVideos = targetTemplate.videos || []
-    if (sourceVideos.length === 0) {
-        utilsStore.showMessage('当前没有可提交的视频', 'warning')
-        return
-    }
-
-    if (!options?.skipConfirm) {
-        try {
-            await ElMessageBox.confirm(
-                `即将按多稿件模式提交 ${sourceVideos.length} 个视频。每个视频将单独提交为一份稿件，确认继续吗？`,
-                '确认多稿件提交',
-                {
-                    confirmButtonText: '确认提交',
-                    cancelButtonText: '取消',
-                    type: 'warning'
-                }
-            )
-        } catch {
-            return
-        }
-    }
-
-    const submitState = getOrCreateSeparateSubmitState(submitUid, submitTemplateName)
-    submitState.attemptedVideoIds.clear()
-    submitState.successCount = 0
-    submitState.failCount = 0
-    submitState.totalCount = sourceVideos.length
-    submitState.successBvids = []
-    submitState.failedVideoNames = []
-
-    separateSubmittingRecord.value[templateKey] = true
-    separateSubmitCancelledKeys.value.delete(templateKey)
-
-    try {
-        // 确保所有视频都在上传队列中（已存在任务会被自动跳过）
-        await uploadStore.createUploadTask(submitUid, submitTemplateName, sourceVideos)
-
-        if (userConfigStore.configRoot?.auto_start) {
-            setTimeout(async () => {
-                try {
-                    await autoStartWaitingTasks()
-                } catch (error) {
-                    console.error('自动开始任务失败:', error)
-                }
-            }, 500)
-        }
-
-        utilsStore.showMessage('已开启多稿件提交，视频上传完成后将自动逐条提交', 'info')
-        await processSeparateSubmitQueue(templateKey)
-    } catch (error) {
-        console.error('开启多稿件提交失败:', error)
-        utilsStore.showMessage(`开启多稿件提交失败: ${error}`, 'error')
-        clearSeparateSubmitStateByKey(templateKey)
-    }
-}
-const lastSubmit = ref<string>('')
-
-// 卡片折叠状态
-const cardCollapsed = ref({
-    basic: false, // 基本信息
-    tags: false, // 标签设置
-    description: false, // 视频描述
-    videos: false, // 视频文件
-    advanced: false // 高级选项
-})
-
-// 模板名编辑相关
-const isEditingTemplateName = ref(false)
-const editingTemplateName = ref('')
-const templateNameInputRef = ref()
-
-// 拖拽状态
-const isDragOver = ref(false)
+const { cardCollapsed, toggleCardCollapsed, restoreCardCollapsedState } = useCardCollapse()
 
 // 内容容器引用
 const contentWrapperRef = ref<HTMLElement | null>(null)
 
 // 用户配置相关
-const userConfigVisible = ref(false)
-const configUser = ref<any>(null)
 
-// 分区数据
-const selectedCategory = ref<any>(null)
-const selectedSubCategory = ref<any>(null)
-const categoryPopoverVisible = ref(false)
 let generalUpdateTimer: ReturnType<typeof setInterval> | null = null
 // 轮询防重入标志，避免上一次请求未完成时重复发起
 let queuePolling = false
 
 // 判断上传队列中是否有需要轮询的活跃任务
-const hasActiveUploadTasks = () => {
-    return uploadStore.uploadQueue.some(
-        task =>
-            task.status === 'Running' ||
-            task.status === 'Waiting' ||
-            task.status === 'Pending'
-    )
-}
-
-// 将已完成任务的文件信息同步到模板配置
-const syncCompletedTasksFromQueue = () => {
-    return syncCompletedTasksToConfig(userConfigStore.configRoot, uploadStore.uploadQueue)
-}
 
 const currentTemplate = computed(() => {
     if (!selectedUser.value || !currentTemplateName.value || !userConfigStore.configRoot?.config) {
@@ -1949,21 +1228,12 @@ const videos = computed({
 
 // 检查指定模板是否有未保存的改动
 const checkTemplateHasUnsavedChanges = (uid: number, templateName: string): boolean => {
-    if (!userConfigStore.configRoot?.config || !userConfigStore.configBase?.config) {
-        return false
-    }
-
-    const currentUserConfig = userConfigStore.configRoot.config[uid]
-    const baseUserConfig = userConfigStore.configBase.config[uid]
-
-    if (!currentUserConfig?.templates[templateName] || !baseUserConfig?.templates[templateName]) {
-        return false
-    }
-
-    const currentTemplateData = currentUserConfig.templates[templateName]
-    const baseTemplateData = baseUserConfig.templates[templateName]
-
-    return hasUnsavedChanges(baseTemplateData, currentTemplateData)
+    return hasTemplateUnsavedChanges(
+        userConfigStore.configRoot,
+        userConfigStore.configBase,
+        uid,
+        templateName
+    )
 }
 
 // 生命周期
@@ -1985,21 +1255,6 @@ watch(
         const newTags = newTag ? newTag.split(',').filter(tag => tag.trim()) : []
         if (JSON.stringify(newTags) !== JSON.stringify(tags.value)) {
             tags.value = newTags
-        }
-    }
-)
-
-// 监听表单分区变化，更新分区选择（双向绑定）
-watch(
-    () => currentForm.value?.tid,
-    (newTid: number | undefined) => {
-        if (newTid && newTid > 0) {
-            // 根据tid设置选中的分区
-            setSelectedCategoryByTid(newTid)
-        } else {
-            // 如果没有分区信息，清空分区选择
-            selectedCategory.value = null
-            selectedSubCategory.value = null
         }
     }
 )
@@ -2060,106 +1315,11 @@ watch(
     { immediate: true }
 )
 
-const getInteractiveConfirmKey = () => {
-    if (!selectedUser.value?.uid) return ''
-    return `${selectedUser.value.uid}`
-}
-
-const showInteractiveInfoDialog = async () => {
-    await ElMessageBox.alert(
-        '勾选后本视频将被投稿为互动视频，需在规定时间内完成剧情树配置，否则系统可能回收稿件。',
-        '互动功能说明',
-        {
-            confirmButtonText: '知道了',
-            type: 'warning'
-        }
-    )
-}
-
-const confirmInteractiveEnable = async () => {
-    let dontShowAgain = false
-
-    await ElMessageBox.confirm(
-        '<div class="interactive-confirm-dialog">' +
-            '<div class="interactive-confirm-dialog-text">互动视频需在规定时间内完成剧情树配置，否则系统可能回收稿件。</div>' +
-            '<label class="interactive-confirm-dialog-checkbox">' +
-            '<input id="interactive-dont-show-again" type="checkbox" />' +
-            '<span>以后不再显示提示</span>' +
-            '</label>' +
-            '</div>',
-        '确认',
-        {
-            confirmButtonText: '是，我已知晓',
-            cancelButtonText: '否',
-            type: 'warning',
-            dangerouslyUseHTMLString: true,
-            beforeClose: (action, _instance, done) => {
-                void _instance
-                if (action === 'confirm') {
-                    const checkbox = document.getElementById(
-                        'interactive-dont-show-again'
-                    ) as HTMLInputElement | null
-                    dontShowAgain = Boolean(checkbox?.checked)
-                }
-                done()
-            }
-        }
-    )
-
-    return dontShowAgain
-}
-
-watch(
-    () => currentForm.value?.interactive,
-    async (newValue, oldValue) => {
-        if (!currentForm.value || interactiveDialogOpening.value || templateLoading.value) return
-        if (newValue !== 1 || oldValue === 1) return
-
-        const key = getInteractiveConfirmKey()
-        if (!key || interactiveConfirmShown.value[key]) return
-
-        interactiveDialogOpening.value = true
-        try {
-            const dontShowAgain = await confirmInteractiveEnable()
-            if (dontShowAgain) {
-                interactiveConfirmShown.value[key] = true
-            }
-        } catch {
-            currentForm.value.interactive = 0
-        } finally {
-            interactiveDialogOpening.value = false
-        }
-    }
-)
-
-watch(
-    () => currentForm.value?.is_only_self,
-    async (newValue, oldValue) => {
-        if (!currentForm.value || onlySelfDialogOpening.value || templateLoading.value) return
-        if (Number(newValue || 0) !== 1 || Number(oldValue || 0) === 1) return
-
-        const staffList = Array.isArray(currentForm.value.staff) ? currentForm.value.staff : []
-        if (staffList.length === 0) return
-
-        onlySelfDialogOpening.value = true
-        try {
-            await ElMessageBox.confirm(
-                '仅自己可见时无法进行联合投稿，如果继续，将清空联合投稿信息，是否继续。',
-                '提示',
-                {
-                    confirmButtonText: '继续',
-                    cancelButtonText: '取消',
-                    type: 'warning'
-                }
-            )
-            currentForm.value.staff = []
-        } catch {
-            currentForm.value.is_only_self = 0
-        } finally {
-            onlySelfDialogOpening.value = false
-        }
-    }
-)
+const { showInteractiveInfoDialog } = useInteractiveDialogs({
+    currentForm,
+    selectedUser,
+    templateLoading
+})
 
 let keyboardCleanup: (() => void) | null = null
 
@@ -2197,11 +1357,8 @@ onUnmounted(() => {
         generalUpdateTimer = null
     }
 
-    clearAllSeparateSubmitStates()
-    autoSubmitProcessingKeys.value.clear()
-
-    // 清理所有自动提交状态
-    autoSubmittingRecord.value = {}
+    // 清理所有自动提交与多稿件提交状态
+    resetAllSubmitStates()
 })
 
 // 初始化数据
@@ -2254,152 +1411,6 @@ const initializeData = async () => {
     }
 }
 
-const isPlainObject = (value: unknown): value is Record<string, any> => {
-    return Object.prototype.toString.call(value) === '[object Object]'
-}
-
-const normalizeForCompare = (value: any): any => {
-    if (Array.isArray(value)) {
-        return value.map(item => normalizeForCompare(item))
-    }
-
-    if (isPlainObject(value)) {
-        const sorted: Record<string, any> = {}
-        for (const key of Object.keys(value).sort()) {
-            sorted[key] = normalizeForCompare(value[key])
-        }
-        return sorted
-    }
-
-    return value
-}
-
-const stableStringify = (value: any): string => {
-    return JSON.stringify(normalizeForCompare(value))
-}
-
-const hasUnsavedChanges = (
-    baseTemplateData: TemplateConfig,
-    currentTemplateData: TemplateConfig
-) => {
-    // 比较关键字段
-    const fieldsToCompare = [
-        'title',
-        'cover',
-        'copyright',
-        'source',
-        'tid',
-        'tid_v2',
-        'desc',
-        'desc_v2',
-        'dynamic',
-        'tag',
-        'dtime',
-        'open_subtitle',
-        'interactive',
-        'mission_id',
-        'topic_id',
-        'topic_name',
-        'season_id',
-        'section_id',
-        'dolby',
-        'lossless_music',
-        'no_reprint',
-        'open_elec',
-        'no_disturbance',
-        'up_selection_reply',
-        'up_close_reply',
-        'up_close_danmu',
-        'is_only_self',
-        'watermark',
-        'is_360',
-        'staff',
-        'state',
-        'state_desc'
-    ]
-
-    for (const field of fieldsToCompare) {
-        const currentValue = (currentTemplateData as any)[field]
-        const baseValue = (baseTemplateData as any)[field]
-
-        // 处理 undefined/null/空字符串 的情况
-        if (
-            (currentValue === undefined || currentValue === null || currentValue === '') &&
-            (baseValue === undefined || baseValue === null || baseValue === '')
-        ) {
-            continue
-        }
-
-        if (stableStringify(currentValue) !== stableStringify(baseValue)) {
-            // console.log(field, '有改动')
-            // console.log(
-            //     'current: ',
-            //     stableStringify(currentValue),
-            //     'vs',
-            //     stableStringify(baseValue)
-            // )
-            return true
-        }
-    }
-
-    // 特别比较 videos 数组
-    const currentVideos = currentTemplateData.videos || []
-    const baseVideos = baseTemplateData.videos || []
-
-    if (currentVideos.length !== baseVideos.length) {
-        return true
-    }
-
-    // 比较视频的关键字段
-    for (let i = 0; i < currentVideos.length; i++) {
-        const currentVideo = currentVideos[i]
-        const baseVideo = baseVideos[i]
-
-        const videoFieldsToCompare = ['title', 'filename', 'desc', 'path', 'cid']
-        for (const field of videoFieldsToCompare) {
-            if (
-                stableStringify((currentVideo as any)[field]) !==
-                stableStringify((baseVideo as any)[field])
-            ) {
-                return true
-            }
-        }
-    }
-
-    return false
-}
-
-// 设置拖拽功能
-const setupDragAndDrop = async () => {
-    try {
-        // 监听文件拖拽事件
-        await listen('tauri://drag-drop', async event => {
-            const videos = event.payload as string[]
-            isDragOver.value = false
-            if (templateLoading.value) {
-                utilsStore.showMessage('模板加载中', 'warning')
-                return
-            }
-            await handleDroppedFiles(videos)
-        })
-
-        // 监听拖拽悬停事件
-        await listen('tauri://drag-over', event => {
-            if (!isDragOver.value) console.log('文件拖拽悬停:', event.payload, '，忽略后续日志')
-            isDragOver.value = true
-        })
-
-        // 监听拖拽取消事件
-        await listen('tauri://drag-leave', () => {
-            console.log('文件拖拽取消')
-            isDragOver.value = false
-        })
-    } catch (error) {
-        console.error('设置拖拽功能失败: ', error)
-        utilsStore.showMessage(`'设置拖拽功能失败: ${error}'`, 'error')
-    }
-}
-
 // 设置键盘快捷键
 const setupKeyboardShortcuts = async () => {
     const handleKeydown = (event: KeyboardEvent) => {
@@ -2442,342 +1453,35 @@ const setupKeyboardShortcuts = async () => {
 }
 
 // 切换卡片折叠状态
-const toggleCardCollapsed = (cardKey: keyof typeof cardCollapsed.value) => {
-    cardCollapsed.value[cardKey] = !cardCollapsed.value[cardKey]
-    // 保存折叠状态到localStorage
-    saveCardCollapsedState()
-}
+const {
+    saveTemplateSelection,
+    restoreTemplateSelection,
+    clearSavedSelection,
+    clearSavedSelectionForUser
+} = useTemplateSelection({
+    loginUsers,
+    userTemplates,
+    selectTemplate: (user, templateName) => selectTemplate(user, templateName),
+    toggleUserExpanded: uid => toggleUserExpanded(uid),
+    showMessage: (message, type) => utilsStore.showMessage(message, type)
+})
 
-// 模板选择记忆功能
-const TEMPLATE_SELECTION_KEY = 'last-selected-template'
-const CARD_COLLAPSED_KEY = 'card-collapsed-state'
-
-// 是否正在恢复模板选择（避免递归保存）
-const isRestoringTemplate = ref(false)
-
-// 保存模板选择到localStorage
-const saveTemplateSelection = (userUid: number, templateName: string) => {
-    // 如果正在恢复模板，不保存（避免递归）
-    if (isRestoringTemplate.value) return
-
-    try {
-        const selection = {
-            userUid,
-            templateName,
-            timestamp: Date.now()
-        }
-        localStorage.setItem(TEMPLATE_SELECTION_KEY, JSON.stringify(selection))
-    } catch (error) {
-        console.error('保存模板选择失败:', error)
-    }
-}
-
-// 保存卡片折叠状态
-const saveCardCollapsedState = () => {
-    try {
-        localStorage.setItem(CARD_COLLAPSED_KEY, JSON.stringify(cardCollapsed.value))
-    } catch (error) {
-        console.error('保存卡片折叠状态失败:', error)
-    }
-}
-
-// 恢复卡片折叠状态
-const restoreCardCollapsedState = () => {
-    try {
-        const saved = localStorage.getItem(CARD_COLLAPSED_KEY)
-        if (saved) {
-            const savedState = JSON.parse(saved)
-            Object.assign(cardCollapsed.value, savedState)
-        }
-    } catch (error) {
-        console.error('恢复卡片折叠状态失败:', error)
-    }
-}
-
-// 从localStorage恢复模板选择
-const restoreTemplateSelection = async () => {
-    try {
-        const saved = localStorage.getItem(TEMPLATE_SELECTION_KEY)
-        if (!saved) return
-
-        const selection = JSON.parse(saved)
-        const { userUid, templateName, timestamp } = selection
-
-        // 检查数据有效性（超过30天的记录自动失效）
-        const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000
-        if (timestamp && timestamp < thirtyDaysAgo) {
-            localStorage.removeItem(TEMPLATE_SELECTION_KEY)
-            return
-        }
-
-        // 检查用户是否仍然登录
-        const targetUser = loginUsers.value.find(user => user.uid === userUid)
-        if (!targetUser) {
-            // 用户已不存在，清除记录
-            localStorage.removeItem(TEMPLATE_SELECTION_KEY)
-            return
-        }
-
-        if (targetUser.expired) {
-            // 过期账号不恢复历史模板选择
-            localStorage.removeItem(TEMPLATE_SELECTION_KEY)
-            return
-        }
-
-        // 检查模板是否仍然存在
-        const userTemplate = userTemplates.value.find(ut => ut.user.uid === userUid)
-        const template = userTemplate?.templates.find(t => t.name === templateName)
-        if (!template) {
-            // 模板已不存在，清除记录
-            localStorage.removeItem(TEMPLATE_SELECTION_KEY)
-            return
-        }
-
-        // 确保用户是展开状态
-        if (userTemplate && !userTemplate.expanded) {
-            toggleUserExpanded(userUid)
-        }
-
-        // 设置恢复状态标志
-        isRestoringTemplate.value = true
-
-        // 自动选择模板
-        await selectTemplate(targetUser, templateName)
-
-        // 恢复完成后重置标志
-        isRestoringTemplate.value = false
-
-        console.log(`自动恢复模板选择: ${targetUser.username} - ${templateName}`)
-        utilsStore.showMessage(`已恢复上次选择的模板: ${templateName}`, 'success')
-    } catch (error) {
-        console.error('恢复模板选择失败:', error)
-        // 如果恢复失败，清除无效的存储数据
-        localStorage.removeItem(TEMPLATE_SELECTION_KEY)
-    } finally {
-        // 确保标志被重置
-        isRestoringTemplate.value = false
-    }
-}
-
-// 清空卡片内容
-const clearCardContent = async (cardType: 'basic' | 'tags' | 'description' | 'advanced') => {
-    if (!currentForm.value) {
-        utilsStore.showMessage('请先选择模板', 'warning')
-        return
-    }
-
-    // 如果正在加载模板，禁止清空
-    if (templateLoading.value) {
-        utilsStore.showMessage('模板正在加载中，请稍后再试', 'warning')
-        return
-    }
-
-    try {
-        // 确认清空
-        await ElMessageBox.confirm(
-            `确定要清空"${getCardDisplayName(cardType)}"的所有内容吗？`,
-            '确认清空',
-            {
-                confirmButtonText: '确定',
-                cancelButtonText: '取消',
-                type: 'warning'
-            }
-        )
-
-        // 根据卡片类型清空相应内容
-        switch (cardType) {
-            case 'basic':
-                currentForm.value.title = ''
-                currentForm.value.cover = ''
-                currentForm.value.tid = 0
-                currentForm.value.tid_v2 = 0
-                currentForm.value.copyright = 1
-                currentForm.value.source = ''
-                // 同步清空分区选择状态
-                selectedCategory.value = null
-                selectedSubCategory.value = null
-                break
-
-            case 'tags':
-                currentForm.value.tag = ''
-                // 同步清空标签数组
-                tags.value = []
-                // 通过组件引用清空TagView的状态
-                tagViewRef.value?.clearTags()
-                currentForm.value.staff = undefined
-                break
-
-            case 'description':
-                currentForm.value.desc = ''
-                currentForm.value.desc_v2 = undefined
-                currentForm.value.dynamic = ''
-                break
-
-            case 'advanced':
-                currentForm.value.watermark =
-                    userConfigStore?.configRoot?.config[selectedUser.value.uid]?.watermark || 0
-                currentForm.value.dtime = undefined
-                currentForm.value.interactive = 0
-                currentForm.value.dolby = 0
-                currentForm.value.lossless_music = 0
-                currentForm.value.no_reprint = 0
-                currentForm.value.open_elec = 0
-                currentForm.value.no_disturbance = 0
-                currentForm.value.up_selection_reply = 0
-                currentForm.value.up_close_reply = 0
-                currentForm.value.up_close_danmu = 0
-                currentForm.value.atomic_int = 0
-                currentForm.value.is_only_self = 0
-                currentForm.value.is_360 = -1
-                break
-        }
-
-        utilsStore.showMessage(`已清空"${getCardDisplayName(cardType)}"的内容`, 'success')
-    } catch (error) {
-        // 用户取消了操作
-    }
-}
-
-// 获取卡片显示名称
-const getCardDisplayName = (cardType: string): string => {
-    const cardNames: Record<string, string> = {
-        basic: '基本信息',
-        tags: '标签设置',
-        description: '视频描述',
-        videos: '视频文件',
-        advanced: '高级选项'
-    }
-    return cardNames[cardType] || cardType
-}
-
-const ensureTitleFromFirstVideo = (videoTitle: string) => {
-    if (!currentForm.value) return
-
-    const currentTitle = (currentForm.value.title || '').trim()
-    if (currentTitle) return
-
-    const importedVideoTitle = (videoTitle || '').trim()
-    if (importedVideoTitle) {
-        currentForm.value.title = importedVideoTitle
-    }
-}
-
-const addVideoToCurrentForm = async (videoPath: string) => {
-    // 从路径中提取文件名
-    const videoBaseName = videoPath.split(/[/\\]/).pop() || videoPath
-    const videoNameWOExtension = videoBaseName.replace(/\.[^/.]+$/, '').slice(0, 80)
-    const videoExt = videoBaseName.split('.').pop()?.toLowerCase() || ''
-
-    const extFilter = [
-        'mp4',
-        'flv',
-        'avi',
-        'wmv',
-        'mov',
-        'webm',
-        'mpeg4',
-        'ts',
-        'mpg',
-        'rm',
-        'rmvb',
-        'mkv',
-        'm4v'
-    ]
-
-    if (videoExt && !extFilter.includes(videoExt)) {
-        return 0 // 不支持的格式，跳过添加
-    }
-
-    // 检查文件是否已经存在
-    if (!currentForm.value) {
-        return 0 // 没有当前模板，跳过添加
-    }
-
-    const existingFile = currentForm.value.videos.find(
-        f => f.path === videoPath || videoNameWOExtension === f.title
-    )
-    if (existingFile) {
-        return 0 // 跳过已存在的文件
-    }
-
-    const currentAddedVideos = currentForm.value.videos.filter(video => {
-        return (
-            (video.finished_at && video.finished_at > 0) || (video.path && video.path.trim() !== '')
-        )
-    })
-
-    // 检查是否超过100个视频的限制
-    if (currentAddedVideos.length >= 100) {
-        utilsStore.showMessage('单次提交最大限制100个视频文件，无法添加更多视频', 'error')
-        return 0
-    }
-
-    // 添加到currentForm.videos
-    const videoId = uuidv4()
-    currentForm.value.videos.push({
-        id: videoId,
-        filename: videoBaseName, // 使用完整的文件路径
-        title: videoNameWOExtension, // 去除扩展名作为标题
-        desc: '',
-        path: videoPath, // 保存完整路径
-        original_file_path: videoPath, // 原始文件路径，稿件发布成功后用于删除
-        complete: false
-    })
-
-    // 标题为空时，自动使用本次导入的第一个视频文件名（去扩展名）作为标题
-    ensureTitleFromFirstVideo(videoNameWOExtension)
-
-    // 检查是否启用自动添加到上传队列
-    if (userConfigStore.configRoot?.auto_upload && selectedUser.value) {
-        try {
-            // 自动创建上传任务
-            await uploadStore.createUploadTask(
-                selectedUser.value.uid,
-                currentTemplateName.value,
-                currentForm.value.videos
-            )
-            console.log(`自动添加文件到上传队列: ${videoBaseName}`)
-
-            // 如果同时启用自动开始，则自动开始任务
-            if (userConfigStore.configRoot?.auto_start) {
-                // 延迟一下让任务先添加到队列
-                setTimeout(async () => {
-                    try {
-                        await autoStartWaitingTasks()
-                    } catch (error) {
-                        console.error('自动开始任务失败:', error)
-                    }
-                }, 500)
-            }
-        } catch (error) {
-            console.error('自动添加到上传队列失败:', error)
-        }
-    }
-    return 1
-}
-
-// 处理拖拽文件
-const handleDroppedFiles = async (videoFiles: any) => {
-    // 检查是否有选中的用户和模板
-    if (!selectedUser.value || !currentTemplateName.value) {
-        utilsStore.showMessage('请先选择用户和模板后再拖拽文件', 'warning')
-        return
-    }
-
-    // 添加视频文件到当前模板
-    let addedCount = 0
-    templateLoading.value = true
-    for (const videoPath of videoFiles.paths) {
-        addedCount += await addVideoToCurrentForm(videoPath)
-    }
-    templateLoading.value = false
-
-    if (addedCount > 0) {
-        utilsStore.showMessage(`成功添加 ${addedCount} 个视频文件`, 'success')
-    } else {
-        utilsStore.showMessage('所有文件都已存在，未添加新文件', 'info')
-    }
-}
+const {
+    isDragOver,
+    setupDragAndDrop,
+    selectVideoWithTauri,
+    clearAllVideos,
+    removeUploadedFile,
+    createUpload,
+    handleAddVideosToForm
+} = useVideoImport({
+    currentForm,
+    selectedUser,
+    currentTemplateName,
+    templateLoading,
+    uploading,
+    autoStartWaitingTasks: () => autoStartWaitingTasks()
+})
 
 // 处理登录成功
 const handleLoginSuccess = async () => {
@@ -2813,664 +1517,56 @@ const toggleUserExpanded = (userUid: number) => {
     userConfigStore.toggleUserExpanded(userUid)
 }
 
-// 处理模板名编辑点击 - 在模板加载时禁用
-const handleTemplateNameEdit = () => {
-    if (!templateLoading.value) {
-        startEditTemplateName()
-    }
-}
+const {
+    typeList,
+    typeListV2,
+    selectedCategory,
+    selectedSubCategory,
+    categoryPopoverVisible,
+    isEditingTemplateName,
+    editingTemplateName,
+    templateNameInputRef,
+    selectTemplate,
+    resetTemplate,
+    saveTemplate,
+    reloadTemplateFromAV,
+    handleTemplateCommand,
+    handleTemplateCreated,
+    handleTemplateNameEdit,
+    saveTemplateName,
+    cancelEditTemplateName,
+    refreshSeasonList,
+    onCategoryChange,
+    onSubCategoryChange
+} = useTemplateManager({
+    templateLoading,
+    selectedUser,
+    currentTemplateName,
+    currentForm,
+    tags,
+    contentWrapperRef,
+    lastSubmit,
+    currentTemplate,
+    loginUsers,
+    seasonViewRef,
+    getCurrentAutoSubmitting,
+    saveTemplateSelection: (uid, name) => saveTemplateSelection(uid, name),
+    clearSavedSelection: () => clearSavedSelection()
+})
 
-const refreshSeasonList = async () => {
-    if (templateLoading.value) {
-        return
-    }
-
-    if (!selectedUser.value?.uid) {
-        utilsStore.showMessage('请先选择用户和模板', 'warning')
-        return
-    }
-
-    try {
-        await seasonViewRef.value?.refreshSeasons()
-        utilsStore.showMessage('合集列表已刷新', 'success')
-    } catch (error) {
-        console.error('刷新合集列表失败:', error)
-        utilsStore.showMessage(`刷新合集列表失败: ${error}`, 'error')
-    }
-}
-
-// 选择模板
-const selectTemplate = async (user: any, templateName: string) => {
-    // 如果正在加载模板，禁止切换
-    if (templateLoading.value) {
-        return
-    }
-
-    if (selectedUser.value === user && currentTemplateName.value === templateName) {
-        // 如果已经选择了相同的用户和模板，则不需要切换
-        return
-    }
-
-    templateLoading.value = true
-    try {
-        lastSubmit.value = ''
-
-        // 切换模板时，按模板所属用户重新初始化投稿前信息与活动列表
-        await utilsStore.initArchievePre(user.uid)
-        await utilsStore.initTopicList(user.uid)
-
-        selectedUser.value = user
-        currentTemplateName.value = templateName
-
-        // 滚动到顶部
-        nextTick(() => {
-            if (contentWrapperRef.value) {
-                contentWrapperRef.value.scrollTop = 0
-            }
-        })
-
-        // 加载模板数据到表单
-        await loadTemplate()
-
-        // 保存模板选择到localStorage
-        saveTemplateSelection(user.uid, templateName)
-
-        // 如果模板有 aid，主动刷新模板数据
-        const aid = currentTemplate.value?.aid
-        setTimeout(async () => {
-            if (aid) {
-                try {
-                    if (
-                        selectedUser.value?.uid === user.uid &&
-                        currentTemplateName.value === templateName
-                    ) {
-                        const newTemplate = await getNewTemplateFromAv(user.uid, aid)
-                        const currentTemplateData =
-                            userConfigStore.configRoot?.config[user.uid].templates[templateName]
-                        if (
-                            currentTemplateData &&
-                            hasUnsavedChanges(newTemplate, currentTemplateData)
-                        ) {
-                            await ElMessageBox.confirm(
-                                `检测到本地模板内容与bilibili不一致，是否刷新？（此操作会丢失所有未保存的更改）`,
-                                '',
-                                {
-                                    confirmButtonText: '刷新并继续',
-                                    cancelButtonText: '不刷新，仅显示当前',
-                                    type: 'info'
-                                }
-                            )
-                            await reloadTemplateFromAV(user.uid, aid)
-                        }
-                    }
-                } catch (error) {
-                    console.error('自动刷新模板数据失败:', error)
-                }
-            }
-        }, 666)
-        console.log(`已切换到模板: ${user.username} - ${templateName}`)
-    } catch (error) {
-        console.error('切换模板失败:', error)
-        utilsStore.showMessage(`切换模板失败: ${error}`, 'error')
-    } finally {
-        templateLoading.value = false
-    }
-}
-
-const resetTemplate = async () => {
-    if (!selectedUser.value || !currentTemplateName.value) {
-        utilsStore.showMessage('请先选择用户和模板', 'warning')
-        return
-    }
-
-    // 如果正在加载模板，禁止重置
-    if (templateLoading.value) {
-        utilsStore.showMessage('模板正在加载中，请稍后再试', 'warning')
-        return
-    }
-
-    // 确认重置
-    try {
-        await ElMessageBox.confirm('确定要清除所有未保存的更改吗?', '', {
-            confirmButtonText: '确定',
-            cancelButtonText: '取消',
-            type: 'warning'
-        })
-
-        templateLoading.value = true
-        try {
-            currentForm.value =
-                JSON.parse(
-                    JSON.stringify(
-                        userConfigStore.configBase?.config[selectedUser.value.uid]?.templates[
-                            currentTemplateName.value
-                        ]
-                    )
-                ) || userConfigStore.createDefaultTemplate()
-            utilsStore.showMessage('模板已重置', 'success')
-        } finally {
-            templateLoading.value = false
-        }
-    } catch (error) {
-        // 用户取消了重置
-        console.log('重置操作已取消')
-    }
-}
-
-const getNewTemplateFromAv = async (userUid: number, aid: number) => {
-    try {
-        const newTemplate = (await utilsStore.getVideoDetail(userUid, aid.toString())) as any
-
-        // 处理视频列表
-        if (newTemplate.videos && Array.isArray(newTemplate.videos)) {
-            for (const video of newTemplate.videos) {
-                video.id = video.filename
-                video.path = ''
-            }
-        }
-
-        if (newTemplate.aid && (await utilsStore.getSeasonList(userUid))) {
-            const season_id = await utilsStore.getVideoSeason(userUid, newTemplate.aid)
-
-            if (season_id !== 0) {
-                const section_id = await utilsStore.seasonlist.find(
-                    item => item.season_id === season_id
-                )?.section_id
-                newTemplate.season_id = season_id
-                newTemplate.section_id = section_id
-            }
-        }
-
-        newTemplate.watermark = currentForm.value?.watermark
-        return newTemplate
-    } catch (error) {
-        console.error('获取新模板失败: ', error)
-        throw error
-    }
-}
-
-const reloadTemplateFromAV = async (userUid: number, aid: number) => {
-    // 如果正在加载模板，禁止重新加载
-    if (templateLoading.value) {
-        return
-    }
-
-    if (!selectedUser.value || selectedUser.value.uid !== userUid) {
-        return
-    }
-
-    if (!currentForm.value || currentForm.value.aid !== aid) {
-        return
-    }
-
-    templateLoading.value = true
-    try {
-        const newTemplate = await getNewTemplateFromAv(userUid, aid)
-        currentForm.value = newTemplate
-        utilsStore.showMessage('模板数据已刷新', 'success')
-    } catch (error) {
-        console.error('刷新失败: ', error)
-        utilsStore.showMessage(`刷新失败: ${error}`, 'error')
-        throw error
-    } finally {
-        templateLoading.value = false
-    }
-}
-
-// 加载模板数据到表单
-const loadTemplate = async () => {
-    try {
-        // 如果没有模板，则使用默认模板配置
-        if (!currentTemplate.value) {
-            const defaultTemplate = userConfigStore.createDefaultTemplate()
-            // 直接设置到配置中
-            if (
-                selectedUser.value &&
-                currentTemplateName.value &&
-                userConfigStore.configRoot?.config
-            ) {
-                const userConfig = userConfigStore.configRoot.config[selectedUser.value.uid]
-                if (userConfig) {
-                    userConfig.templates[currentTemplateName.value] = defaultTemplate
-                }
-            }
-
-            // 清空标签
-            tags.value = []
-
-            // 清空分区选择
-            selectedCategory.value = null
-            selectedSubCategory.value = null
-
-            // 等待所有更新完成
-            await nextTick()
-
-            return
-        }
-
-        const template = currentTemplate.value
-
-        // 解析标签
-        tags.value = template.tag ? template.tag.split(',').filter(tag => tag.trim()) : []
-
-        // 设置选中的分区
-        if (template.tid) {
-            setSelectedCategoryByTid(template.tid)
-        } else {
-            // 如果没有分区信息，清空分区选择
-            selectedCategory.value = null
-            selectedSubCategory.value = null
-        }
-
-        // 等待所有更新完成
-        await nextTick()
-
-        // 模板数据已直接操作，无需保存基础状态
-    } catch (error) {
-        console.error('加载模板失败:', error)
-        utilsStore.showMessage(`加载模板失败: ${error}`, 'error')
-    }
-}
-
-// 处理模板命令
-const handleTemplateCommand = async (command: string, user: any, template: any) => {
-    switch (command) {
-        case 'duplicate':
-            try {
-                const newName = `${template.name}_副本`
-                await userConfigStore.duplicateUserTemplate(user.uid, template.name, newName)
-                utilsStore.showMessage('模板复制成功', 'success')
-            } catch (error) {
-                console.error('复制模板失败: ', error)
-                utilsStore.showMessage(`'复制模板失败: ${error}'`, 'error')
-            }
-            break
-
-        case 'rename':
-            try {
-                const { value: newName } = await ElMessageBox.prompt(
-                    '请输入新的模板名称',
-                    '重命名模板',
-                    {
-                        confirmButtonText: '确定',
-                        cancelButtonText: '取消',
-                        inputPlaceholder: '请输入模板名称',
-                        inputValue: template.name,
-                        inputValidator: (value: string) => {
-                            if (!value || !value.trim()) {
-                                return '模板名称不能为空'
-                            }
-                            if (value.trim() === template.name) {
-                                return '新名称不能与原名称相同'
-                            }
-                            return true
-                        }
-                    }
-                )
-
-                const trimmedName = newName.trim()
-
-                // 检查是否已存在同名模板
-                const existingTemplate = userConfigStore.getUserTemplate(user.uid, trimmedName)
-                if (existingTemplate) {
-                    utilsStore.showMessage('该名称的模板已存在，请使用其他名称', 'error')
-                    return
-                }
-
-                await userConfigStore.renameUserTemplate(user.uid, template.name, trimmedName)
-
-                // 更新当前选择
-                if (
-                    selectedUser.value?.uid === user.uid &&
-                    currentTemplateName.value === template.name
-                ) {
-                    currentTemplateName.value = trimmedName
-                    // 更新localStorage中的模板选择记录
-                    saveTemplateSelection(user.uid, trimmedName)
-                }
-
-                utilsStore.showMessage('模板重命名成功', 'success')
-            } catch (error) {
-                if (error !== 'cancel') {
-                    console.error('重命名模板失败: ', error)
-                    utilsStore.showMessage(`'重命名模板失败: ${error}'`, 'error')
-                }
-            }
-            break
-
-        case 'delete':
-            try {
-                const template_name = template.name || currentTemplateName.value
-                await ElMessageBox.confirm(`确定要删除模板"${template_name}"吗？`, '确认删除', {
-                    confirmButtonText: '确定',
-                    cancelButtonText: '取消',
-                    type: 'warning'
-                })
-
-                await userConfigStore.removeUserTemplate(user.uid, template_name)
-
-                // 如果删除的是当前选中的模板，清空选择
-                if (
-                    selectedUser.value?.uid === user.uid &&
-                    currentTemplateName.value === template_name
-                ) {
-                    currentTemplateName.value = ''
-                    selectedUser.value = null
-                    // 清除localStorage中的模板选择记录
-                    localStorage.removeItem(TEMPLATE_SELECTION_KEY)
-                }
-
-                utilsStore.showMessage('模板删除成功', 'success')
-            } catch (error) {
-                if (error !== 'cancel') {
-                    console.error('删除模板失败: ', error)
-                    utilsStore.showMessage(`'删除模板失败: ${error}'`, 'error')
-                }
-            }
-            break
-    }
-}
-
-// 处理模板创建成功事件
-const handleTemplateCreated = async (userUid: number, templateName: string) => {
-    if (getCurrentAutoSubmitting.value) {
-        return
-    }
-
-    // 自动选择新创建的模板
-    const targetUser = loginUsers.value.find(user => user.uid === userUid)
-    if (targetUser) {
-        selectedUser.value = targetUser
-        currentTemplateName.value = templateName
-
-        // 滚动到顶部
-        nextTick(() => {
-            if (contentWrapperRef.value) {
-                contentWrapperRef.value.scrollTop = 0
-            }
-        })
-
-        templateLoading.value = true
-        await loadTemplate()
-        templateLoading.value = false
-
-        // 保存新创建的模板选择
-        saveTemplateSelection(userUid, templateName)
-    }
-}
-
-// 保存模板
-const saveTemplate = async () => {
-    if (!selectedUser.value || !currentTemplateName.value || !currentTemplate.value) {
-        utilsStore.showMessage('请先选择模板', 'error')
-        return
-    }
-
-    try {
-        // 直接保存当前模板配置
-        await userConfigStore.updateUserTemplate(
-            selectedUser.value.uid,
-            currentTemplateName.value,
-            currentTemplate.value
-        )
-
-        // 模板数据已直接操作并保存，无需额外状态管理
-    } catch (error) {
-        console.error('保存模板失败: ', error)
-        utilsStore.showMessage(`'保存模板失败: ${error}'`, 'error')
-    }
-}
-
-// 分区选择相关
-const onCategoryChange = (categoryId: number) => {
-    const category = typeList.value.find(item => item.id === categoryId)
-    selectedCategory.value = category
-    selectedSubCategory.value = null
-    if (currentForm.value) {
-        currentForm.value.tid = 0
-        // 上一行会触发watch事件，导致selectedCategory被清空
-        nextTick(() => {
-            selectedCategory.value = category
-        })
-    }
-}
-
-const onSubCategoryChange = (subCategoryId: number) => {
-    if (selectedCategory.value && selectedCategory.value.children) {
-        const subCategory = selectedCategory.value.children.find(
-            (item: any) => item.id === subCategoryId
-        )
-        selectedSubCategory.value = subCategory
-        if (currentForm.value) {
-            currentForm.value.tid = subCategoryId
-        }
-        // 选择子分区后关闭popover
-        categoryPopoverVisible.value = false
-    }
-}
-
-// 根据tid设置选中的分区
-const setSelectedCategoryByTid = (tid: number) => {
-    for (const category of typeList.value) {
-        if (category.children) {
-            const subCategory = category.children.find((item: any) => item.id === tid)
-            if (subCategory) {
-                selectedCategory.value = category
-                selectedSubCategory.value = subCategory
-                return
-            }
-        }
-    }
-}
+const { clearCardContent } = useCardContent({
+    currentForm,
+    tags,
+    tagViewRef,
+    selectedCategory,
+    selectedSubCategory,
+    templateLoading,
+    selectedUser,
+    getUserWatermark: uid => userConfigStore?.configRoot?.config[uid]?.watermark || 0,
+    showMessage: (message, type) => utilsStore.showMessage(message, type)
+})
 
 // 使用 Tauri 文件对话框选择视频文件
-const selectVideoWithTauri = async () => {
-    if (templateLoading.value) {
-        utilsStore.showMessage('模板加载中', 'warning')
-        return
-    }
-
-    templateLoading.value = true
-    try {
-        const selected = await open({
-            multiple: true,
-            filters: [
-                {
-                    name: 'Video',
-                    extensions: [
-                        'mp4',
-                        'flv',
-                        'avi',
-                        'wmv',
-                        'mov',
-                        'webm',
-                        'mpeg4',
-                        'ts',
-                        'mpg',
-                        'rm',
-                        'rmvb',
-                        'mkv',
-                        'm4v'
-                    ]
-                }
-            ]
-        })
-
-        var added = 0
-
-        if (selected && Array.isArray(selected)) {
-            for (const videoPath of selected) {
-                added += await addVideoToCurrentForm(videoPath)
-            }
-
-            utilsStore.showMessage(`已选择 ${added} 个文件`, 'success')
-        } else if (typeof selected === 'string') {
-            added += await addVideoToCurrentForm(selected)
-            utilsStore.showMessage(`已选择 ${added} 个文件`, 'success')
-        }
-    } catch (error) {
-        console.error('文件选择失败: ', error)
-        utilsStore.showMessage(`'文件选择失败: ${error}'`, 'error')
-    } finally {
-        templateLoading.value = false
-    }
-}
-
-// 清空所有文件
-const clearAllVideos = async () => {
-    if (!currentForm.value?.videos || currentForm.value.videos.length === 0) {
-        return
-    }
-
-    const videoCount = currentForm.value.videos.length
-    const videoText = videoCount === 1 ? '1 个文件' : `${videoCount} 个文件`
-
-    templateLoading.value = true
-    try {
-        await ElMessageBox.confirm(`确定要清空所有已选择的 ${videoText} 吗？`, '确认清空文件', {
-            confirmButtonText: '确定清空',
-            cancelButtonText: '取消',
-            type: 'warning',
-            dangerouslyUseHTMLString: false
-        })
-
-        // 取消所有对应的上传任务
-        const videoIds = currentForm.value.videos.map(video => video.id)
-        const correspondingTasks = uploadStore.uploadQueue.filter(task =>
-            videoIds.includes(task.video?.id)
-        )
-
-        for (const task of correspondingTasks) {
-            try {
-                await uploadStore.cancelUpload(task.id)
-                console.log(`已取消对应的上传任务: ${task.id}`)
-            } catch (error) {
-                console.error('取消上传任务失败:', error)
-                // 继续处理其他任务
-            }
-        }
-
-        // 清空视频文件列表
-        currentForm.value.videos = []
-        utilsStore.showMessage(`已清空 ${videoText}`, 'success')
-    } catch {
-        // 用户取消了操作
-    } finally {
-        templateLoading.value = false
-    }
-}
-
-// 调整视频顺序
-const removeUploadedFile = async (videoId: string) => {
-    if (!currentForm.value?.videos) {
-        return
-    }
-
-    templateLoading.value = true
-    const videoIndex = currentForm.value.videos.findIndex(f => f.id === videoId)
-    if (videoIndex > -1) {
-        const video = currentForm.value.videos[videoIndex]
-
-        try {
-            // 添加确认弹窗
-            await ElMessageBox.confirm(
-                `确定要删除视频文件"${video.title}"吗？此操作不可撤销。`,
-                '确认删除文件',
-                {
-                    confirmButtonText: '确定删除',
-                    cancelButtonText: '取消',
-                    type: 'warning'
-                }
-            )
-
-            // 先查找并取消对应的上传任务
-            const correspondingTask = uploadStore.uploadQueue.find(
-                task => task.video?.id === videoId
-            )
-            if (correspondingTask) {
-                try {
-                    await uploadStore.cancelUpload(correspondingTask.id)
-                    console.log(`已取消对应的上传任务: ${correspondingTask.id}`)
-                } catch (error) {
-                    console.error('取消上传任务失败:', error)
-                    // 即使取消失败，仍然继续删除文件
-                }
-            }
-
-            // 删除视频文件
-            currentForm.value.videos.splice(videoIndex, 1)
-
-            utilsStore.showMessage('文件删除成功', 'success')
-        } catch (error) {
-            // 如果用户取消了确认框，不显示错误消息
-            if (error !== 'cancel') {
-                console.error('删除文件失败:', error)
-                utilsStore.showMessage(`删除文件失败: ${error}`, 'error')
-            }
-        }
-    }
-    templateLoading.value = false
-}
-
-// 上传相关
-const createUpload = async () => {
-    // 检查是否有文件可上传
-    const hasUploadedFiles = currentForm.value?.videos && currentForm.value.videos.length > 0
-
-    if (!hasUploadedFiles) {
-        utilsStore.showMessage('请先选择视频文件', 'error')
-        return
-    }
-
-    if (!selectedUser.value) {
-        utilsStore.showMessage('请先选择用户', 'error')
-        return
-    }
-
-    uploading.value = true
-    try {
-        if (currentForm.value) {
-            console.log('开始上传文件:', currentForm.value.videos)
-            // 确保传递的是正确格式的数组
-            const num_added = await uploadStore.createUploadTask(
-                selectedUser.value.uid,
-                currentTemplateName.value,
-                currentForm.value.videos
-            )
-            utilsStore.showMessage(`添加 ${num_added} 个文件到上传队列`, 'success')
-        }
-
-        // 如果启用自动开始，则自动开始任务
-        if (userConfigStore.configRoot?.auto_start) {
-            setTimeout(async () => {
-                try {
-                    await autoStartWaitingTasks()
-                } catch (error) {
-                    console.error('自动开始任务失败:', error)
-                }
-            }, 500)
-        }
-    } catch (error) {
-        console.error('上传失败: ', error)
-        utilsStore.showMessage(`上传失败: ${error}`, 'error')
-    } finally {
-        uploading.value = false
-    }
-}
-
-// 处理文件夹监控添加视频事件
-const handleAddVideosToForm = async (newVideos: any[]) => {
-    templateLoading.value = true
-    for (const videoPath of newVideos) {
-        try {
-            await addVideoToCurrentForm(videoPath)
-        } catch (error) {
-            console.error(`添加视频失败: ${videoPath}`, error)
-        }
-    }
-    templateLoading.value = false
-}
-
 // 处理文件夹监控提交稿件事件
 const handleSubmitTemplate = async (
     mode: 'single' | 'multi' = 'single',
@@ -3564,128 +1660,21 @@ const submitTemplate = async () => {
     }
 }
 
-// 模板名编辑相关函数
-const startEditTemplateName = () => {
-    isEditingTemplateName.value = true
-    editingTemplateName.value = currentTemplateName.value
-    nextTick(() => {
-        templateNameInputRef.value?.focus()
-    })
-}
-
-const saveTemplateName = async () => {
-    const newName = editingTemplateName.value.trim()
-
-    if (!newName) {
-        utilsStore.showMessage('模板名称不能为空', 'error')
-        cancelEditTemplateName()
-        return
-    }
-
-    if (newName === currentTemplateName.value) {
-        cancelEditTemplateName()
-        return
-    }
-
-    if (!selectedUser.value) {
-        utilsStore.showMessage('未选择用户', 'error')
-        cancelEditTemplateName()
-        return
-    }
-
-    try {
-        const existingTemplate = userConfigStore.getUserTemplate(selectedUser.value.uid, newName)
-        if (existingTemplate) {
-            utilsStore.showMessage('该名称的模板已存在，请使用其他名称', 'error')
-            return
-        }
-
-        await userConfigStore.renameUserTemplate(
-            selectedUser.value.uid,
-            currentTemplateName.value,
-            newName
-        )
-
-        // 更新当前选择
-        currentTemplateName.value = newName
-        saveTemplateSelection(selectedUser.value.uid, newName)
-
-        utilsStore.showMessage('模板重命名成功', 'success')
-        isEditingTemplateName.value = false
-    } catch (error) {
-        console.error('重命名模板失败: ', error)
-        utilsStore.showMessage(`重命名模板失败: ${error}`, 'error')
-        cancelEditTemplateName()
-    }
-}
-
-const cancelEditTemplateName = () => {
-    isEditingTemplateName.value = false
-    editingTemplateName.value = ''
-}
-
-// 用户配置相关方法
-const openUserConfig = (user: any) => {
-    if (user?.expired) {
-        showLoginDialog.value = true
-        utilsStore.showMessage('该用户登录状态已过期，请重新登录', 'warning')
-        return
-    }
-
-    configUser.value = user
-    userConfigVisible.value = true
-}
-
-// 检查用户是否有上传任务
-const isUserHasUploadTasks = (uid: number) => {
-    return uploadStore.uploadQueue.some((task: any) => task.user?.uid === uid)
-}
-
-// 处理用户登出
-const handleLogoutUser = async (uid: number) => {
-    // 如果用户有上传任务，不允许登出
-    if (isUserHasUploadTasks(uid)) {
-        utilsStore.showMessage('用户有未完成的上传任务，无法登出', 'success')
-        return
-    }
-
-    try {
-        const success = await authStore.logoutUser(uid)
-        if (success) {
-            // 如果登出的用户正是当前选择的用户，清除相关记录
-            if (selectedUser.value?.uid === uid) {
-                selectedUser.value = null
-                currentTemplateName.value = ''
-                localStorage.removeItem(TEMPLATE_SELECTION_KEY)
-            } else {
-                // 检查localStorage中记录的用户是否是被登出的用户
-                try {
-                    const saved = localStorage.getItem(TEMPLATE_SELECTION_KEY)
-                    if (saved) {
-                        const selection = JSON.parse(saved)
-                        if (selection.userUid === uid) {
-                            localStorage.removeItem(TEMPLATE_SELECTION_KEY)
-                        }
-                    }
-                } catch (error) {
-                    console.error('清理localStorage记录失败:', error)
-                }
-            }
-
-            utilsStore.showMessage('用户已登出', 'success')
-            // 刷新前端数据
-            await refreshAllData()
-        } else {
-            utilsStore.showMessage('登出失败', 'error')
-        }
-    } catch (error) {
-        // 如果用户取消了确认框，error会是'cancel'，不需要显示错误
-        if (error !== 'cancel') {
-            console.error('登出用户失败:', error)
-            utilsStore.showMessage(`登出失败: ${error}`, 'error')
-        }
-    }
-}
+const {
+    userConfigVisible,
+    configUser,
+    hasActiveUploadTasks,
+    syncCompletedTasksFromQueue,
+    openUserConfig,
+    handleLogoutUser
+} = useUserActions({
+    selectedUser,
+    currentTemplateName,
+    showLoginDialog,
+    refreshAllData: () => refreshAllData(),
+    clearSavedSelection: () => clearSavedSelection(),
+    clearSavedSelectionForUser: uid => clearSavedSelectionForUser(uid)
+})
 
 // 刷新所有数据的方法
 const refreshAllData = async () => {
