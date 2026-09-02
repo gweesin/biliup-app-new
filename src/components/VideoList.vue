@@ -150,7 +150,9 @@
                                 :title="video.title || video.videoname"
                                 :uid="uid"
                                 :disabled="disabled"
-                                @update:model-value="(val: string) => handleVideoCoverChange(video.id, val)"
+                                @update:model-value="
+                                    (val: string) => handleVideoCoverChange(video.id, val)
+                                "
                             />
                         </div>
 
@@ -294,6 +296,7 @@ import {
 import { useUploadStore } from '../stores/upload'
 import FloderWatch from './FloderWatch.vue'
 import CoverUploader from './CoverUploader.vue'
+import { isVideoReadyForSeparateSubmit, getSeparateSubmitBlockReason } from '../utils/videoSubmit'
 
 // Props
 interface Props {
@@ -305,13 +308,16 @@ interface Props {
     disabled?: boolean
     /** LastPublishedBadge 计算出的上次发布时间（Unix 秒），作为排期起始基准 */
     lastPublishTime?: number
+    /** 是否处于多稿件提交模式（用于提示未就绪视频） */
+    separateSubmitting?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
     isDragOver: false,
     uploading: false,
     disabled: false,
-    lastPublishTime: 0
+    lastPublishTime: 0,
+    separateSubmitting: false
 })
 
 // Emits
@@ -350,8 +356,7 @@ const now = new Date()
 scheduleStartDate.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 
 // 每个时间点的视频数量（至少为1）
-const getVideosPerTimeSlot = () =>
-    Math.max(1, Math.floor(Number(videosPerTimeSlot.value)) || 1)
+const getVideosPerTimeSlot = () => Math.max(1, Math.floor(Number(videosPerTimeSlot.value)) || 1)
 
 // 简单字符串哈希，作为随机种子
 const hashSeed = (str: string): number => {
@@ -609,11 +614,7 @@ const syncDtimeFromPublishTimes = (times: (Date | null)[]) => {
 }
 
 // 监听发布时间变化，同步回填 dtime
-watch(
-    publishTimes,
-    times => syncDtimeFromPublishTimes(times),
-    { immediate: true }
-)
+watch(publishTimes, times => syncDtimeFromPublishTimes(times), { immediate: true })
 
 // 切换日期或每时段数量后，强制重新计算并同步更新预计发布时间
 watch([scheduleStartDate, videosPerTimeSlot], () => {
@@ -940,28 +941,42 @@ const isVideoExpiredSoon = (video: any): boolean => {
     }
 }
 
+// 多稿件提交模式下，上传完成但未就绪（未改名/未设置封面）的视频会被阻塞提交
+const isBlockedForSeparateSubmit = (video: any): boolean => {
+    if (!props.separateSubmitting) return false
+    if (!(video.complete && video.path === '')) return false
+    return !isVideoReadyForSeparateSubmit(video)
+}
+
 // 获取视频警告样式类
 const getVideoWarningClass = (video: any): string => {
+    const classes: string[] = []
+
     if (isVideoExpiredSoon(video)) {
+        classes.push('video-warning')
         try {
             const finishedDate = new Date(video.finished_at)
             const now = new Date(currentTime.value) // 使用响应式的当前时间
             const diffHours = (now.getTime() - finishedDate.getTime()) / (1000 * 60 * 60)
-
             if (diffHours >= 8) {
-                return 'video-warning video-expired'
-            } else {
-                return 'video-warning'
+                classes.push('video-expired')
             }
         } catch {
-            return 'video-warning'
+            // 保持默认警告样式
         }
     }
-    return ''
+
+    if (isBlockedForSeparateSubmit(video)) {
+        classes.push('video-warning', 'video-rename-pending')
+    }
+
+    return classes.join(' ')
 }
 
 // 获取视频警告提示文本
 const getVideoWarningTooltip = (video: any): string => {
+    const tips: string[] = []
+
     if (isVideoExpiredSoon(video)) {
         try {
             const finishedDate = new Date(video.finished_at)
@@ -971,15 +986,20 @@ const getVideoWarningTooltip = (video: any): string => {
             )
 
             if (diffHours >= 10) {
-                return '此视频完成超过10小时，服务器可能已删除相关文件'
+                tips.push('此视频完成超过10小时，服务器可能已删除相关文件')
             } else {
-                return `此视频完成已${diffHours}小时，服务器将在10小时后删除相关文件`
+                tips.push(`此视频完成已${diffHours}小时，服务器将在10小时后删除相关文件`)
             }
         } catch {
-            return '视频完成时间较长，可能无法上传'
+            tips.push('视频完成时间较长，可能无法上传')
         }
     }
-    return ''
+
+    if (isBlockedForSeparateSubmit(video)) {
+        tips.push(`待提交：${getSeparateSubmitBlockReason(video)}`)
+    }
+
+    return tips.join('；')
 }
 
 // 处理删除文件
@@ -1436,6 +1456,22 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     50% {
         opacity: 0.7;
     }
+}
+
+/* 多稿件提交模式下未就绪（未改名/未设置封面）的视频 */
+.video-warning.video-rename-pending {
+    border-color: #f56c6c;
+    background: linear-gradient(to right, rgba(245, 108, 108, 0.06), rgba(245, 108, 108, 0.02));
+}
+
+.video-warning.video-rename-pending::before {
+    background: linear-gradient(to bottom, #f56c6c, #e74c3c);
+}
+
+.video-warning.video-rename-pending:hover {
+    border-color: #e74c3c;
+    background: linear-gradient(to right, rgba(245, 108, 108, 0.12), rgba(245, 108, 108, 0.05));
+    box-shadow: 0 2px 8px rgba(245, 108, 108, 0.3);
 }
 
 /* 超过10小时的视频使用更强烈的警告颜色 */

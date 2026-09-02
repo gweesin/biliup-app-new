@@ -445,6 +445,7 @@
                                             :disabled="templateLoading"
                                             :uid="selectedUser.uid"
                                             :last-publish-time="lastPublishedTimeSec"
+                                            :separate-submitting="separateSubmitting"
                                             @select-video="selectVideoWithTauri"
                                             @clear-all-videos="clearAllVideos"
                                             @remove-file="removeUploadedFile"
@@ -1278,7 +1279,12 @@ watch(
                     return `${key}:missing`
                 }
                 const state = template.videos
-                    .map(video => `${video.id}:${video.complete ? 1 : 0}:${video.path || ''}`)
+                    .map(
+                        video =>
+                            `${video.id}:${video.complete ? 1 : 0}:${video.path || ''}:${
+                                video.title || ''
+                            }:${video.cover || ''}`
+                    )
                     .join(',')
                 return `${key}:${state}`
             })
@@ -1299,7 +1305,12 @@ watch(
                 }
 
                 const state = template.videos
-                    .map(video => `${video.id}:${video.complete ? 1 : 0}:${video.path || ''}`)
+                    .map(
+                        video =>
+                            `${video.id}:${video.complete ? 1 : 0}:${video.path || ''}:${
+                                video.title || ''
+                            }:${video.cover || ''}`
+                    )
                     .join(',')
                 return `${key}:${state}`
             })

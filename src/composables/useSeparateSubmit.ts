@@ -4,6 +4,7 @@ import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore } from '../stores/user_config'
 import { useUtilsStore } from '../stores/utils'
 import { deleteOriginalVideoFile, deleteOriginalVideoFiles } from '../utils/videoFileCleanup'
+import { isVideoReadyForSeparateSubmit } from '../utils/videoSubmit'
 import type { SeparateSubmitState, SubmitStatsInput } from '../types/submit'
 
 /** 组合式函数所需的宿主上下文（由 MainView 注入，避免与视图强耦合） */
@@ -410,7 +411,15 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
         )
         const hasPendingReadyVideos = remainingVideos.some(
             video =>
-                video.complete && video.path === '' && !submitState.attemptedVideoIds.has(video.id)
+                isVideoReadyForSeparateSubmit(video) && !submitState.attemptedVideoIds.has(video.id)
+        )
+        // 已上传完成但尚未就绪（标题未修改或未设置封面）的视频，等待用户处理后自动继续
+        const hasBlockedReadyVideos = remainingVideos.some(
+            video =>
+                video.complete &&
+                video.path === '' &&
+                !submitState.attemptedVideoIds.has(video.id) &&
+                !isVideoReadyForSeparateSubmit(video)
         )
 
         // 模板被删光视频后应及时释放状态，避免按钮一直显示“停止多稿件提交”
@@ -437,6 +446,12 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
 
         if (hasPendingReadyVideos) {
             void processSeparateSubmitQueue(templateKey)
+            return
+        }
+
+        // 存在已上传完成但未就绪（未改名/未设置封面）的视频时保持提交进行中，
+        // 待用户修改标题并设置封面后由状态监听触发自动继续
+        if (hasBlockedReadyVideos) {
             return
         }
 
@@ -502,8 +517,7 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
 
             const readyVideo = (targetTemplate.videos || []).find(
                 video =>
-                    video.complete &&
-                    video.path === '' &&
+                    isVideoReadyForSeparateSubmit(video) &&
                     !submitState.attemptedVideoIds.has(video.id)
             )
 
@@ -657,7 +671,7 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
         if (!options?.skipConfirm) {
             try {
                 await ElMessageBox.confirm(
-                    `即将按多稿件模式提交 ${sourceVideos.length} 个视频。每个视频将单独提交为一份稿件，确认继续吗？`,
+                    `即将按多稿件模式提交 ${sourceVideos.length} 个视频。每个视频将单独提交为一份稿件；上传完成后需为每个视频修改标题并设置封面，才会自动提交，确认继续吗？`,
                     '确认多稿件提交',
                     {
                         confirmButtonText: '确认提交',
