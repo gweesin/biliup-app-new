@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useUtilsStore } from './utils'
+import { useAuthStore } from './auth'
 
 interface UploadTask {
     id: string
@@ -23,6 +24,7 @@ interface UploadTask {
 export const useUploadStore = defineStore('upload', () => {
     const uploadQueue = ref<UploadTask[]>([])
     const utilsStore = useUtilsStore()
+    const authStore = useAuthStore()
     const submitInvokeIntervalMs = 5000
     const submitCancelCode = 'SUBMIT_CANCELLED'
     const submitRequestQueue: Array<{
@@ -233,10 +235,32 @@ export const useUploadStore = defineStore('upload', () => {
         }
     }
 
+    // 后端下发队列时会清空 user.avatar（base64 图片体积大），这里按 uid 用登录用户头像补全
+    const fillUserAvatar = (queue: UploadTask[]) => {
+        if (queue.length === 0 || authStore.loginUsers.length === 0) {
+            return
+        }
+
+        const avatarMap = new Map<number, string>(
+            authStore.loginUsers.map(user => [user.uid, user.avatar])
+        )
+
+        for (const task of queue) {
+            if (!task.user || task.user.avatar) {
+                continue
+            }
+            const avatar = avatarMap.get(task.user.uid)
+            if (avatar) {
+                task.user.avatar = avatar
+            }
+        }
+    }
+
     // 获取上传队列
     const getUploadQueue = async () => {
         try {
             const queue: UploadTask[] = await invoke('get_upload_queue')
+            fillUserAvatar(queue)
             uploadQueue.value = queue
             // 更新速率
             const now = Date.now()

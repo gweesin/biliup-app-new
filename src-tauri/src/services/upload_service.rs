@@ -104,7 +104,9 @@ impl UploadService {
         // trace!("获取上传队列");
         for task_mutex in self.upload_queue.lock().await.values() {
             let task = task_mutex.lock().await;
-            let cloned = task.clone();
+            let mut cloned = task.clone();
+            // 头像是 base64 图片，体积较大，队列轮询没必要下发，前端按 uid 自行补全
+            cloned.user.avatar.clear();
             let should_cleanup = task.is_completed() || task.is_failed();
             let task_id = task.id.clone();
             let title = task.title();
