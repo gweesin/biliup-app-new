@@ -216,7 +216,7 @@ export const useUtilsStore = defineStore('template', () => {
     }
 
     const getVideoSeason = async (uid: number, aid: number) => {
-        if (!hasSeason) {
+        if (!hasSeason.value) {
             return 0
         }
 
@@ -225,6 +225,21 @@ export const useUtilsStore = defineStore('template', () => {
             return season
         } catch (error) {
             console.error('获取视频合集失败:', error)
+            throw error
+        }
+    }
+
+    /**
+     * 查询稿件首个分P的 cid
+     * 投稿接口只返回 aid/bvid，加入合集需要 cid，新投稿的视频上传阶段拿不到，
+     * 因此投稿完成后需要单独查询一次
+     */
+    const getVideoCid = async (uid: number, aid: number) => {
+        try {
+            const cid = (await invoke('get_video_cid', { uid, aid })) as number
+            return cid
+        } catch (error) {
+            console.error('获取稿件 cid 失败:', error)
             throw error
         }
     }
@@ -238,7 +253,7 @@ export const useUtilsStore = defineStore('template', () => {
         title: string,
         add: boolean
     ) => {
-        if (!hasSeason) {
+        if (!hasSeason.value) {
             return
         }
 
@@ -364,6 +379,7 @@ export const useUtilsStore = defineStore('template', () => {
         hasSeason,
         getSeasonList,
         getVideoSeason,
+        getVideoCid,
         switchSeason,
         showMessage,
         exportLogs,

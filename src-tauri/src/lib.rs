@@ -280,6 +280,7 @@ pub async fn run() {
             get_season_list,
             get_video_detail,
             get_video_season,
+            get_video_cid,
             switch_season,
             export_logs,
             check_update,

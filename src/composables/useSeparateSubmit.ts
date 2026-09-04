@@ -236,6 +236,33 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
         return [...head, ...tail]
     }
 
+    /**
+     * 获取稿件首个分P的 cid
+     * 上传阶段拿不到 cid（biliup 上传结果不返回 cid），而加入合集必须携带 cid，
+     * 因此投稿请求完成后需要单独按 aid 查询一次
+     */
+    const resolveSeasonCid = async (uid: number, aid: number, template: any) => {
+        const configuredCid = Number(template?.videos?.[0]?.cid || 0)
+        if (configuredCid > 0) {
+            return configuredCid
+        }
+
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const cid = Number(await utilsStore.getVideoCid(uid, aid))
+                if (cid > 0) {
+                    return cid
+                }
+            } catch (error) {
+                console.error('获取稿件 cid 失败: ', error)
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000))
+        }
+
+        return 0
+    }
+
     const syncSeasonAfterSubmit = async (uid: number, resp: any, template: any) => {
         if (!(resp && resp.aid && utilsStore.hasSeason)) {
             return
@@ -249,19 +276,25 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
         }
 
         try {
-            const old_season_id = await utilsStore.getVideoSeason(uid, resp.aid)
-            let add = old_season_id && old_season_id !== 0 ? false : true
+            const old_season_id = Number((await utilsStore.getVideoSeason(uid, resp.aid)) || 0)
+            const cid = await resolveSeasonCid(uid, resp.aid, template)
 
-            if (template && old_season_id !== template.season_id && template.videos[0]?.cid) {
-                const new_season_id = template.season_id || 0
-                const new_section_id = template.section_id || 0
+            if (!cid) {
+                utilsStore.showMessage(`视频${resp.bvid}加入合集失败：未能获取稿件 cid`, 'error')
+                return
+            }
+
+            if (old_season_id !== configuredSeasonId) {
+                const new_section_id = Number(template?.section_id || 0)
+                // 稿件尚未加入任何合集时使用新增接口，已在合集中则使用切换接口
+                const add = !(old_season_id > 0)
                 await utilsStore.switchSeason(
                     uid,
                     resp.aid,
-                    template.videos[0]?.cid,
-                    new_season_id,
+                    cid,
+                    configuredSeasonId,
                     new_section_id,
-                    template.title,
+                    template?.title || '',
                     add
                 )
 

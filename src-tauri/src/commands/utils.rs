@@ -803,6 +803,36 @@ pub async fn get_video_season(app: tauri::AppHandle, uid: u64, aid: u64) -> Resu
     }
 }
 
+/// 查询稿件首个分P的 cid
+///
+/// 投稿接口（add/v3）只返回 aid 与 bvid，而加入合集（switch_season）必须携带 cid。
+/// 上传阶段 biliup 不会回传 cid，因此需要在投稿请求完成后单独查询一次。
+#[tauri::command]
+pub async fn get_video_cid(app: tauri::AppHandle, uid: u64, aid: u64) -> Result<u64, AppError> {
+    let app_data = app.state::<AppData>();
+
+    let proxy = app_data
+        .config
+        .lock()
+        .await
+        .config
+        .get(&uid)
+        .and_then(|c| c.proxy.clone());
+
+    let bilibili = app_data.get_bilibili(uid).await?;
+
+    let res = bilibili
+        .video_data(&biliup::uploader::bilibili::Vid::Aid(aid), proxy.as_deref())
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("获取稿件视频信息失败: {e}")))?;
+
+    Ok(res["videos"]
+        .as_array()
+        .and_then(|videos| videos.first())
+        .and_then(|video| video["cid"].as_u64())
+        .unwrap_or(0))
+}
+
 #[tauri::command]
 pub async fn switch_season(
     app: tauri::AppHandle,
