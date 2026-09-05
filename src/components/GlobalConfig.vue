@@ -129,7 +129,7 @@
             <el-form-item label="模型名称">
                 <el-input
                     v-model="configForm.ai_model"
-                    placeholder="例如 gpt-4o-mini / qwen-vl-plus"
+                    placeholder="例如 gpt-4o-mini / deepseek-v4-flash-vision-exp / qwen-vl-plus"
                     clearable
                     :disabled="!configForm.ai_enabled"
                 />

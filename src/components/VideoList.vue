@@ -758,7 +758,7 @@ const handleAiGenerateTitle = (video: any) => {
     if (aiGenerating.value) {
         return
     }
-    const localPath = video.path || ''
+    const localPath = video.original_file_path || video.path || ''
     if (!localPath) {
         utilsStore.showMessage('该视频缺少本地源文件，AI 生成标题仅支持本地视频', 'warning')
         return
@@ -784,7 +784,7 @@ const openAiTitlesDialog = async () => {
     aiGenerating.value = true
     aiCandidates.value = []
     try {
-        const titles = await utilsStore.generateAiTitles(target.path || '')
+        const titles = await utilsStore.generateAiTitles(target.original_file_path || target.path || '')
         aiCandidates.value = titles
     } catch (error) {
         aiDialogVisible.value = false

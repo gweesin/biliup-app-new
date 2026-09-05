@@ -16,6 +16,8 @@
 - Rust 命令 `generate_ai_titles(video_path)`（`src-tauri/src/commands/ai.rs`）：校验配置 → `resolve_ffmpeg`（配置路径→PATH→Windows 常见目录）→ ffprobe/ffmpeg 探测时长 → `ffmpeg -ss dur-3 -frames:v 1 -c:v mjpeg` 截帧 → 请求 `{base}/chat/completions` 视觉接口（Bearer，120s 超时，prompt 常量 AI_PROMPT 要求提取英雄+KDA 生成 6-10 个标题）→ 清洗返回候选标题（JSON 数组/编号行，去重最多 12 条）。
 - `VideoList.vue`：`.video-title` 末尾 sparkle svg（类 `.ai-icon`，紫色 hover 发光）→ 点击弹候选列表对话框（`.ai-candidate-*`）→ 点击候选通过 `emit('update:videos')` 回填 title。
 - 注意：AI 截帧依赖本机 ffmpeg；未配置/未安装时命令返回中文错误提示，需引导用户前往全局设置。
+- 使用要点（2026-09-05 查证）：OpenAI 兼容 /chat/completions 的 `model` 均为必填（含 DeepSeek 官方 API），不可留空；DeepSeek 视觉模型名为 `deepseek-v4-flash-vision-exp`（支持 base64 图片，普通 deepseek-v4-* 无法识别图片）；设置页模型名 placeholder 已含该示例。
+- VideoList 中传给 AI 截帧/删除源文件等操作的本地路径应使用 `video.original_file_path`（`video.path` 在上传完成后会被清空，两者语义不同），2026-09-05 已修正 `handleAiGenerateTitle` 两处取值。
 
 ## 封面匹配功能（2026-08-23 实现）
 - `GlobalConfig.vue`：新增"封面匹配路径"配置项，输入框 + "选择文件夹"按钮（`open({ directory: true })`，来自 `@tauri-apps/plugin-dialog`）。
