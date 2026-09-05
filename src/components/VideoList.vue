@@ -116,10 +116,10 @@
                                     }}</span>
                                     <el-icon class="edit-icon"><edit /></el-icon>
                                     <svg
-                                        class="ai-icon"
+                                        :class="['ai-icon', { 'is-generating': aiGenerating }]"
                                         viewBox="0 0 16 16"
                                         xmlns="http://www.w3.org/2000/svg"
-                                        title="AI 生成标题（截取视频最后3秒画面）"
+                                        :title="aiGenerating ? 'AI 正在生成标题…' : 'AI 一键生成标题（截取视频最后3秒画面）'"
                                         @click.stop.prevent="handleAiGenerateTitle(video)"
                                     >
                                         <path d="M0 0h16v16H0z" fill="none" />
@@ -284,44 +284,6 @@
             </div>
         </div>
 
-        <!-- AI 标题生成对话框 -->
-        <el-dialog
-            v-model="aiDialogVisible"
-            title="AI 生成标题"
-            width="560px"
-            :close-on-click-modal="false"
-            append-to-body
-        >
-            <div v-loading="aiGenerating" element-loading-text="AI 分析中…" class="ai-dialog-body">
-                <template v-if="!aiGenerating && aiCandidates.length > 0">
-                    <p class="ai-dialog-tip">
-                        已截取视频「最后 3 秒」画面提交 AI，生成以下候选标题，点击即可应用到当前视频：
-                    </p>
-                    <ul class="ai-candidate-list">
-                        <li
-                            v-for="(title, index) in aiCandidates"
-                            :key="index"
-                            class="ai-candidate-item"
-                            @click="applyAiTitle(title)"
-                        >
-                            <span class="ai-candidate-index">{{ index + 1 }}</span>
-                            <span class="ai-candidate-title">{{ title }}</span>
-                        </li>
-                    </ul>
-                </template>
-                <template v-else-if="!aiGenerating && aiCandidates.length === 0">
-                    <el-empty description="AI 未返回标题，请检查全局设置中的 AI 配置" :image-size="60">
-                        <el-button size="small" type="primary" @click="retryAiGenerate">
-                            重新生成
-                        </el-button>
-                    </el-empty>
-                </template>
-            </div>
-            <template #footer>
-                <el-button @click="aiDialogVisible = false">关闭</el-button>
-            </template>
-        </el-dialog>
-
         <!-- 文件夹监控对话框 -->
         <FloderWatch
             v-model="showFolderWatchDialog"
@@ -394,11 +356,8 @@ const uploadStore = useUploadStore()
 const userConfigStore = useUserConfigStore()
 const utilsStore = useUtilsStore()
 
-// AI 标题生成状态
-const aiDialogVisible = ref(false)
+// AI 标题生成状态（生成单个标题后自动应用）
 const aiGenerating = ref(false)
-const aiCandidates = ref<string[]>([])
-const aiTargetVideo = ref<any>(null)
 
 // 文件夹监控对话框状态
 const showFolderWatchDialog = ref(false)
@@ -753,8 +712,8 @@ const isAiConfigured = (): boolean => {
     return !!ai && !!ai.enabled && !!ai.api_key && !!ai.model
 }
 
-// 触发 AI 标题生成：截取视频倒数第三秒画面并请求模型
-const handleAiGenerateTitle = (video: any) => {
+// 触发 AI 一键生成标题：截取视频倒数第三秒画面提交模型，成功后自动应用
+const handleAiGenerateTitle = async (video: any) => {
     if (aiGenerating.value) {
         return
     }
@@ -770,57 +729,30 @@ const handleAiGenerateTitle = (video: any) => {
         )
         return
     }
-    aiTargetVideo.value = video
-    openAiTitlesDialog()
-}
-
-// 打开 AI 标题对话框并请求生成
-const openAiTitlesDialog = async () => {
-    const target = aiTargetVideo.value
-    if (!target) {
-        return
-    }
-    aiDialogVisible.value = true
     aiGenerating.value = true
-    aiCandidates.value = []
     try {
-        const titles = await utilsStore.generateAiTitles(target.original_file_path || target.path || '')
-        aiCandidates.value = titles
+        const title = await utilsStore.generateAiTitle(localPath)
+        const newTitle = String(title || '').trim().slice(0, 80)
+        if (!newTitle) {
+            utilsStore.showMessage('AI 未返回有效标题，请稍后重试', 'warning')
+            return
+        }
+        const newVideos = props.videos.map(item => {
+            if (item.id === video.id) {
+                return {
+                    ...item,
+                    title: newTitle
+                }
+            }
+            return item
+        })
+        emit('update:videos', newVideos)
+        utilsStore.showMessage(`已应用 AI 标题：${newTitle}`, 'success')
     } catch (error) {
-        aiDialogVisible.value = false
         utilsStore.showMessage(`AI 生成标题失败: ${error}`, 'error')
     } finally {
         aiGenerating.value = false
     }
-}
-
-// 重新生成
-const retryAiGenerate = () => {
-    openAiTitlesDialog()
-}
-
-// 应用选中的 AI 标题到当前视频
-const applyAiTitle = (title: string) => {
-    const target = aiTargetVideo.value
-    if (!target) {
-        return
-    }
-    const newTitle = String(title || '').trim().slice(0, 80)
-    if (!newTitle) {
-        return
-    }
-    const newVideos = props.videos.map(video => {
-        if (video.id === target.id) {
-            return {
-                ...video,
-                title: newTitle
-            }
-        }
-        return video
-    })
-    emit('update:videos', newVideos)
-    aiDialogVisible.value = false
-    utilsStore.showMessage('已应用 AI 生成的标题', 'success')
 }
 
 // 更新单个视频的封面
@@ -1425,6 +1357,23 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     filter: drop-shadow(0 0 4px rgba(114, 46, 209, 0.55));
 }
 
+.ai-icon.is-generating {
+    color: #722ed1;
+    opacity: 1;
+    cursor: wait;
+    pointer-events: none;
+    animation: ai-icon-spin 1.2s linear infinite;
+}
+
+@keyframes ai-icon-spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
 .video-title-edit {
     flex: 1;
     width: 100%;
@@ -1673,68 +1622,4 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     }
 }
 
-/* AI 标题生成对话框 */
-.ai-dialog-body {
-    min-height: 120px;
-    max-height: 60vh;
-    overflow-y: auto;
-}
-
-.ai-dialog-tip {
-    font-size: 12px;
-    color: #909399;
-    margin: 0 0 12px 0;
-    line-height: 1.5;
-}
-
-.ai-candidate-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.ai-candidate-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
-    border: 1px solid #e4e7ed;
-    border-radius: 6px;
-    background: #fafbfc;
-    cursor: pointer;
-    transition: all 0.2s ease;
-}
-
-.ai-candidate-item:hover {
-    border-color: #722ed1;
-    background: linear-gradient(to right, rgba(114, 46, 209, 0.06), rgba(114, 46, 209, 0.02));
-    box-shadow: 0 2px 8px rgba(114, 46, 209, 0.18);
-    transform: translateX(2px);
-}
-
-.ai-candidate-index {
-    flex-shrink: 0;
-    width: 20px;
-    height: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    background: #722ed1;
-    color: #fff;
-    font-size: 11px;
-    font-weight: 600;
-}
-
-.ai-candidate-title {
-    flex: 1;
-    min-width: 0;
-    font-size: 13px;
-    color: #303133;
-    line-height: 1.4;
-    word-break: break-all;
-}
 </style>

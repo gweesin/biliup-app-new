@@ -20,23 +20,26 @@ const AI_PROMPT: &str = "请处理这张 MOBA 游戏对局结算截图，按要�
 - 战绩 KDA：提取该英雄对应的「击杀数 / 死亡数 / 助攻数」
 
 生成战报标题
-基于提取到的英雄名和 KDA 战绩，生成 6-10 个有冲击力、适合游戏高光展示的标题，要求：
-1. 每个标题必须包含英雄名称，英雄名称是三国人物名称，有的前面会包含 “梦”
-2. 结合 KDA 突出战绩亮点（可从高击杀、零死亡、高助攻、全场 Carry、极致生存等不同角度创作）
+基于提取到的英雄名和 KDA 战绩，生成 1 个最有冲击力、最适合游戏高光展示的标题，要求：
+1. 标题必须包含英雄名称，英雄名称是三国人物名称，有的前面会包含 “梦”，如“梦·许褚”，需要处理为“梦许褚”
+2. 可以结合 KDA 突出战绩亮点（可从高击杀、零死亡、高助攻、全场 Carry、极致生存等角度择优创作）
 3. 风格参考示例：
    14 杀张纮秀翻全场
    0 死张纮七进七出无人能敌
    张纮极致操作碾压全场
+   甘宁甘兴霸制霸全场！
+   关凤狭路相逢勇者胜！
+   邓艾60vs59精彩对决！
 4. 标题简短有力，符合游戏社区的表达习惯，能够结合当下热点话题，吸引流量
 
-请只输出生成的标题列表，每行一个标题，不要输出解释或前后缀文字。";
+请只输出这 1 个标题本身，不要编号、不要引号、不要列表，不要输出任何解释或前后缀文字。";
 
-/// 截取视频（倒数第三秒）画面并请求 AI 生成标题，返回候选标题列表
+/// 截取视频（倒数第三秒）画面并请求 AI 生成一个标题
 #[tauri::command]
-pub async fn generate_ai_titles(
+pub async fn generate_ai_title(
     app: tauri::AppHandle,
     video_path: String,
-) -> Result<Vec<String>, AppError> {
+) -> Result<String, AppError> {
     let video_path = video_path.trim().to_string();
     if video_path.is_empty() || !Path::new(&video_path).is_file() {
         return Err(AppError::Custom("视频文件不存在或路径无效".to_string()));
@@ -70,9 +73,9 @@ pub async fn generate_ai_titles(
     let data_url = format!("data:image/jpeg;base64,{}", encode_base64(&frame_bytes));
     info!("视频画面截取成功, {} 字节, 时间点 {target:.3}s", frame_bytes.len());
 
-    // 4. 请求 OpenAI 兼容的视觉接口
-    let titles = request_ai_titles(&ai, data_url).await?;
-    Ok(titles)
+    // 4. 请求 OpenAI 兼容的视觉接口，取 AI 生成的单个标题
+    let title = request_ai_title(&ai, data_url).await?;
+    Ok(title)
 }
 
 /// 校验 AI 配置是否完整可用
@@ -303,8 +306,8 @@ fn build_chat_endpoint(base_url: &str) -> String {
     format!("{base}/chat/completions")
 }
 
-/// 请求 OpenAI 兼容视觉接口，返回候选标题列表
-async fn request_ai_titles(ai: &AiConfig, image_data_url: String) -> Result<Vec<String>, AppError> {
+/// 请求 OpenAI 兼容视觉接口，返回 AI 生成的单个标题
+async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<String, AppError> {
     let endpoint = build_chat_endpoint(&ai.base_url);
     if endpoint.is_empty() {
         return Err(AppError::Custom("AI 接口地址无效".to_string()));
@@ -313,7 +316,7 @@ async fn request_ai_titles(ai: &AiConfig, image_data_url: String) -> Result<Vec<
     let body = json!({
         "model": ai.model.trim(),
         "temperature": 0.8,
-        "max_tokens": 1000,
+        "max_tokens": 300,
         "messages": [
             {
                 "role": "user",
@@ -380,14 +383,15 @@ async fn request_ai_titles(ai: &AiConfig, image_data_url: String) -> Result<Vec<
         other => other.to_string(),
     };
 
+    // 解析出标题（兼容模型偶尔输出的列表/编号），只取第一条
     let titles = parse_titles(&content_text);
-    if titles.is_empty() {
-        return Err(AppError::Custom(format!(
+    let title = titles.into_iter().next().filter(|t| !t.is_empty()).ok_or_else(|| {
+        AppError::Custom(format!(
             "AI 未返回有效标题，原始回复: {}",
             content_text.chars().take(300).collect::<String>()
-        )));
-    }
-    Ok(titles)
+        ))
+    })?;
+    Ok(title)
 }
 
 /// 从模型回复文本中提取标题列表（支持 JSON 数组 / 编号行 / 列表符号等）
@@ -570,7 +574,7 @@ fn normalize_title(line: &str) -> Option<String> {
     Some(title)
 }
 
-/// 去重（保持顺序），最多返回 12 条
+/// 去重（保持顺序）
 fn dedupe_titles(titles: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
@@ -578,9 +582,6 @@ fn dedupe_titles(titles: Vec<String>) -> Vec<String> {
         let key = title.to_lowercase();
         if seen.insert(key) {
             result.push(title);
-        }
-        if result.len() >= 12 {
-            break;
         }
     }
     result
