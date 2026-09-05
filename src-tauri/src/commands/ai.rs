@@ -316,7 +316,10 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
     let body = json!({
         "model": ai.model.trim(),
         "temperature": 0.8,
-        "max_tokens": 300,
+        // 显式关闭流式，避免个别端点默认返回 SSE
+        "stream": false,
+        // 标题本身很短，但思考型模型的思维链会占用大量输出预算，太小会导致正文为空
+        // "max_tokens": 1000,
         "messages": [
             {
                 "role": "user",
@@ -364,24 +367,32 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
         )));
     }
 
-    let parsed: Value = serde_json::from_str(&text)
-        .map_err(|e| AppError::Custom(format!("解析 AI 响应失败: {e}")))?;
+    // 记录响应片段，便于排查（截断避免日志过大）
+    info!(
+        "AI 响应 (HTTP {status}): {}",
+        text.chars().take(1000).collect::<String>()
+    );
 
-    // 提取模型回复文本
-    let content = parsed
-        .pointer("/choices/0/message/content")
-        .ok_or_else(|| AppError::Custom("AI 响应缺少 content 字段".to_string()))?;
+    let parsed: Value = serde_json::from_str(&text).map_err(|e| {
+        AppError::Custom(format!(
+            "解析 AI 响应失败: {e}; 原始响应: {}",
+            text.chars().take(500).collect::<String>()
+        ))
+    })?;
 
-    let content_text = match content {
-        Value::String(s) => s.clone(),
-        // 部分模型返回结构化 content（数组），拼接其中的文本片段
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        other => other.to_string(),
-    };
+    let (content_text, reasoning_text) = extract_message_content(&parsed);
+    if content_text.trim().is_empty() {
+        let brief: String = text.chars().take(800).collect();
+        if reasoning_text.is_some() {
+            return Err(AppError::Custom(format!(
+                "AI 只返回了思考内容（reasoning）而没有正文，通常是思考模式耗尽了输出长度。\
+                 请调大 max_tokens 或在接口侧关闭思考模式。响应片段: {brief}"
+            )));
+        }
+        return Err(AppError::Custom(format!(
+            "AI 返回的 content 为空：可能是该模型不支持图片输入、响应结构不兼容或输出被截断。响应片段: {brief}"
+        )));
+    }
 
     // 解析出标题（兼容模型偶尔输出的列表/编号），只取第一条
     let titles = parse_titles(&content_text);
@@ -392,6 +403,52 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
         ))
     })?;
     Ok(title)
+}
+
+/// 从响应中提取模型正文，兼容多种返回结构。
+/// 返回：(正文内容, 思考/推理内容)
+fn extract_message_content(parsed: &Value) -> (String, Option<String>) {
+    let as_text = |value: &Value| -> Option<String> {
+        match value {
+            // 忽略空串与 null（null 不能当标题）
+            Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+            // 部分模型返回结构化 content（数组），拼接其中的文本片段
+            Value::Array(items) => {
+                let parts: Vec<String> = items
+                    .iter()
+                    .filter_map(|item| {
+                        item.get("text")
+                            .or_else(|| item.get("content"))
+                            .and_then(|t| t.as_str())
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|s| s.to_string())
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join("\n"))
+                }
+            }
+            _ => None,
+        }
+    };
+
+    let content = parsed
+        .pointer("/choices/0/message/content")
+        .and_then(as_text)
+        // 部分兼容端点的备选字段
+        .or_else(|| parsed.pointer("/choices/0/text").and_then(as_text))
+        .or_else(|| parsed.pointer("/output_text").and_then(as_text))
+        .or_else(|| parsed.pointer("/result").and_then(as_text))
+        .unwrap_or_default();
+
+    // 推理型模型（deepseek-reasoner、带思考开关的模型）可能把输出写在这里
+    let reasoning = parsed
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(as_text);
+
+    (content, reasoning)
 }
 
 /// 从模型回复文本中提取标题列表（支持 JSON 数组 / 编号行 / 列表符号等）
