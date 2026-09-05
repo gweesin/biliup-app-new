@@ -9,6 +9,13 @@
 ## 全局配置字段
 - `max_curr`（最大并发任务数）、`auto_upload`、`auto_start`、`log_level`。
 - `cover_match_path`（封面匹配路径，String，2026-08-23 新增）：存放封面图片的文件夹路径，用于按标题关键字自动匹配封面。
+- `ai`（AiConfig 对象，2026-09-05 新增）：`{ enabled, base_url, api_key, model, ffmpeg_path }`，OpenAI 兼容接口配置，默认 base_url=`https://api.openai.com/v1`。
+
+## AI 标题生成功能（2026-09-05 实现）
+- `GlobalConfig.vue`：新增"AI 设置"分区（开启开关、Base URL、API Key 密码框、模型名、ffmpeg 路径+选择文件按钮）。
+- Rust 命令 `generate_ai_titles(video_path)`（`src-tauri/src/commands/ai.rs`）：校验配置 → `resolve_ffmpeg`（配置路径→PATH→Windows 常见目录）→ ffprobe/ffmpeg 探测时长 → `ffmpeg -ss dur-3 -frames:v 1 -c:v mjpeg` 截帧 → 请求 `{base}/chat/completions` 视觉接口（Bearer，120s 超时，prompt 常量 AI_PROMPT 要求提取英雄+KDA 生成 6-10 个标题）→ 清洗返回候选标题（JSON 数组/编号行，去重最多 12 条）。
+- `VideoList.vue`：`.video-title` 末尾 sparkle svg（类 `.ai-icon`，紫色 hover 发光）→ 点击弹候选列表对话框（`.ai-candidate-*`）→ 点击候选通过 `emit('update:videos')` 回填 title。
+- 注意：AI 截帧依赖本机 ffmpeg；未配置/未安装时命令返回中文错误提示，需引导用户前往全局设置。
 
 ## 封面匹配功能（2026-08-23 实现）
 - `GlobalConfig.vue`：新增"封面匹配路径"配置项，输入框 + "选择文件夹"按钮（`open({ directory: true })`，来自 `@tauri-apps/plugin-dialog`）。

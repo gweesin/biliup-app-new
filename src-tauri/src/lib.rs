@@ -263,6 +263,8 @@ pub async fn run() {
             rename_user_template,
             save_template_order,
             save_user_order,
+            // AI 标题生成
+            generate_ai_titles,
             // 其他命令
             get_current_version,
             get_file_size,

@@ -84,6 +84,80 @@
                 </div>
             </el-form-item>
 
+            <!-- AI 配置分类标签 -->
+            <el-divider content-position="left">
+                <el-text type="primary" size="large">AI 设置</el-text>
+            </el-divider>
+
+            <!-- 开启 AI 标题生成 -->
+            <el-form-item label="开启 AI 标题生成">
+                <el-switch
+                    v-model="configForm.ai_enabled"
+                    active-text="开启"
+                    inactive-text="关闭"
+                />
+                <div class="form-tip">
+                    在视频列表中点击标题旁的 ✨ 图标，自动截取视频最后 3 秒画面并生成标题
+                </div>
+            </el-form-item>
+
+            <!-- AI 接口地址 -->
+            <el-form-item label="接口地址 Base URL">
+                <el-input
+                    v-model="configForm.ai_base_url"
+                    placeholder="https://api.openai.com/v1"
+                    clearable
+                    :disabled="!configForm.ai_enabled"
+                />
+                <div class="form-tip">支持任意 OpenAI 兼容的视觉模型接口（OpenAI / DeepSeek / 通义千问 / Ollama 等）</div>
+            </el-form-item>
+
+            <!-- API Key -->
+            <el-form-item label="API Key">
+                <el-input
+                    v-model="configForm.ai_api_key"
+                    type="password"
+                    show-password
+                    placeholder="sk-..."
+                    clearable
+                    :disabled="!configForm.ai_enabled"
+                />
+                <div class="form-tip">密钥仅保存在本地配置文件中</div>
+            </el-form-item>
+
+            <!-- 模型名称 -->
+            <el-form-item label="模型名称">
+                <el-input
+                    v-model="configForm.ai_model"
+                    placeholder="例如 gpt-4o-mini / qwen-vl-plus"
+                    clearable
+                    :disabled="!configForm.ai_enabled"
+                />
+                <div class="form-tip">需要支持图片输入（视觉）的模型</div>
+            </el-form-item>
+
+            <!-- ffmpeg 路径 -->
+            <el-form-item label="ffmpeg 路径">
+                <div class="ffmpeg-path-container">
+                    <el-input
+                        v-model="configForm.ai_ffmpeg_path"
+                        placeholder="留空自动搜索系统 PATH 与常见安装目录"
+                        clearable
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <el-button
+                        @click="handleSelectFfmpegPath"
+                        :disabled="!configForm.ai_enabled"
+                    >
+                        <el-icon><FolderOpened /></el-icon>
+                        <span style="margin-left: 4px">选择文件</span>
+                    </el-button>
+                </div>
+                <div class="form-tip">
+                    用于截取视频画面，未检测到 ffmpeg 时 AI 生成标题不可用
+                </div>
+            </el-form-item>
+
             <!-- 用户配置分类标签 -->
             <el-divider content-position="left">
                 <el-text type="primary" size="large">用户配置</el-text>
@@ -256,6 +330,11 @@ interface GlobalConfigForm {
     auto_start: boolean
     log_level: string
     cover_match_path: string
+    ai_enabled: boolean
+    ai_base_url: string
+    ai_api_key: string
+    ai_model: string
+    ai_ffmpeg_path: string
 }
 
 // Props
@@ -305,22 +384,23 @@ const selectedUser = computed(
     () => loginUsers.value.find(user => user.uid === selectedUserUid.value) || null
 )
 
-const configForm = ref<GlobalConfigForm>({
+const defaultGlobalConfigForm = (): GlobalConfigForm => ({
     max_curr: 1,
     auto_upload: true,
     auto_start: true,
     log_level: 'info',
-    cover_match_path: ''
+    cover_match_path: '',
+    ai_enabled: false,
+    ai_base_url: 'https://api.openai.com/v1',
+    ai_api_key: '',
+    ai_model: '',
+    ai_ffmpeg_path: ''
 })
 
+const configForm = ref<GlobalConfigForm>(defaultGlobalConfigForm())
+
 // 保存原始配置用于检查变化
-const originalConfig = ref<GlobalConfigForm>({
-    max_curr: 1,
-    auto_upload: true,
-    auto_start: true,
-    log_level: 'info',
-    cover_match_path: ''
-})
+const originalConfig = ref<GlobalConfigForm>(defaultGlobalConfigForm())
 
 // 监听 modelValue 变化
 watch(
@@ -374,12 +454,18 @@ const loadGlobalConfig = async () => {
 
         if (userConfigStore.configRoot) {
             const config = userConfigStore.configRoot
+            const ai = config.ai || { enabled: false }
             configForm.value = {
                 max_curr: config.max_curr || 2,
                 auto_upload: config.auto_upload ?? true,
                 auto_start: config.auto_start ?? true,
                 log_level: config.log_level || 'info',
-                cover_match_path: config.cover_match_path || ''
+                cover_match_path: config.cover_match_path || '',
+                ai_enabled: ai.enabled ?? false,
+                ai_base_url: ai.base_url || 'https://api.openai.com/v1',
+                ai_api_key: ai.api_key || '',
+                ai_model: ai.model || '',
+                ai_ffmpeg_path: ai.ffmpeg_path || ''
             }
 
             // 保存原始配置
@@ -412,7 +498,14 @@ const handleSave = async () => {
             auto_upload: configForm.value.auto_upload,
             auto_start: configForm.value.auto_start,
             log_level: configForm.value.log_level,
-            cover_match_path: configForm.value.cover_match_path.trim()
+            cover_match_path: configForm.value.cover_match_path.trim(),
+            ai: {
+                enabled: configForm.value.ai_enabled,
+                base_url: configForm.value.ai_base_url.trim(),
+                api_key: configForm.value.ai_api_key.trim(),
+                model: configForm.value.ai_model.trim(),
+                ffmpeg_path: configForm.value.ai_ffmpeg_path.trim()
+            }
         })
 
         // 如果选择了用户，保存用户配置
@@ -567,13 +660,7 @@ const handleClose = (done: () => void) => {
 // 对话框关闭后的处理
 const handleDialogClose = () => {
     // 重置表单为默认值
-    configForm.value = {
-        max_curr: 1,
-        auto_upload: true,
-        auto_start: true,
-        log_level: 'info',
-        cover_match_path: ''
-    }
+    configForm.value = defaultGlobalConfigForm()
     originalConfig.value = { ...configForm.value }
 }
 
@@ -584,7 +671,12 @@ const hasUnsavedChanges = (): boolean => {
         configForm.value.auto_upload !== originalConfig.value.auto_upload ||
         configForm.value.auto_start !== originalConfig.value.auto_start ||
         configForm.value.log_level !== originalConfig.value.log_level ||
-        configForm.value.cover_match_path !== originalConfig.value.cover_match_path
+        configForm.value.cover_match_path !== originalConfig.value.cover_match_path ||
+        configForm.value.ai_enabled !== originalConfig.value.ai_enabled ||
+        configForm.value.ai_base_url !== originalConfig.value.ai_base_url ||
+        configForm.value.ai_api_key !== originalConfig.value.ai_api_key ||
+        configForm.value.ai_model !== originalConfig.value.ai_model ||
+        configForm.value.ai_ffmpeg_path !== originalConfig.value.ai_ffmpeg_path
     )
 }
 
@@ -604,6 +696,24 @@ const handleSelectCoverMatchPath = async () => {
         utilsStore.showMessage(`选择文件夹失败: ${error}`, 'error')
     }
 }
+
+// 打开文件选择弹窗，选择 ffmpeg.exe 路径
+const handleSelectFfmpegPath = async () => {
+    try {
+        const selected = await open({
+            title: '选择 ffmpeg 可执行文件',
+            directory: false,
+            multiple: false,
+            filters: [{ name: 'ffmpeg', extensions: ['exe', 'bin', '*'] }]
+        })
+        if (typeof selected === 'string' && selected) {
+            configForm.value.ai_ffmpeg_path = selected
+        }
+    } catch (error) {
+        console.error('选择 ffmpeg 路径失败:', error)
+        utilsStore.showMessage(`选择文件失败: ${error}`, 'error')
+    }
+}
 </script>
 
 <style scoped>
@@ -620,6 +730,12 @@ const handleSelectCoverMatchPath = async () => {
 }
 
 .cover-match-path-container {
+    width: 100%;
+    display: flex;
+    gap: 8px;
+}
+
+.ffmpeg-path-container {
     width: 100%;
     display: flex;
     gap: 8px;

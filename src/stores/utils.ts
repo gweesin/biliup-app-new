@@ -183,6 +183,20 @@ export const useUtilsStore = defineStore('template', () => {
         }
     }
 
+    /**
+     * 请求 AI 生成标题：截取视频倒数第三秒画面提交视觉模型，返回候选标题列表
+     * 需先在全局设置中配置 AI 接口与 ffmpeg
+     */
+    const generateAiTitles = async (videoPath: string): Promise<string[]> => {
+        try {
+            const titles = await invoke<string[]>('generate_ai_titles', { videoPath })
+            return titles || []
+        } catch (error) {
+            console.error('AI 生成标题失败:', error)
+            throw error
+        }
+    }
+
     const getVideoDetail = async (uid: number, videoId: string) => {
         try {
             const detail = await invoke('get_video_detail', { uid, videoId })
@@ -369,6 +383,7 @@ export const useUtilsStore = defineStore('template', () => {
         getAvatarCacheDir,
         readDirRecursive,
         uploadCover,
+        generateAiTitles,
         downloadCover,
         initArchievePre,
         initTopicList,

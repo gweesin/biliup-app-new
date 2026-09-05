@@ -170,6 +170,42 @@ pub struct UserConfig {
     pub template_updated_at: HashMap<String, u64>,
 }
 
+/// AI 服务（OpenAI 兼容接口）与视频截帧配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfig {
+    /// 是否启用 AI 标题生成
+    #[serde(default)]
+    pub enabled: bool,
+    /// OpenAI 兼容接口地址，例如 https://api.openai.com/v1
+    #[serde(default = "default_ai_base_url")]
+    pub base_url: String,
+    /// 接口密钥（仅保存在本地配置文件中）
+    #[serde(default)]
+    pub api_key: String,
+    /// 支持视觉输入的模型名，例如 gpt-4o-mini
+    #[serde(default)]
+    pub model: String,
+    /// ffmpeg 可执行文件路径，留空时自动在 PATH 与常见目录中查找
+    #[serde(default)]
+    pub ffmpeg_path: String,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_ai_base_url(),
+            api_key: String::new(),
+            model: String::new(),
+            ffmpeg_path: String::new(),
+        }
+    }
+}
+
+fn default_ai_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigRoot {
     #[serde(default)]
@@ -182,6 +218,8 @@ pub struct ConfigRoot {
     pub log_level: String,
     #[serde(default)]
     pub cover_match_path: String,
+    #[serde(default)]
+    pub ai: AiConfig,
     #[serde(default)]
     pub user_order: Vec<u64>,
     #[serde(default)]
@@ -327,16 +365,25 @@ impl ConfigRoot {
         auto_upload: bool,
         log_level: String,
         cover_match_path: String,
+        ai: AiConfig,
     ) -> &Self {
         info!(
-            "更新全局配置: max_curr={}, auto_start={}, auto_upload={}, log_level={}, cover_match_path={}",
-            max_curr, auto_start, auto_upload, log_level, cover_match_path
+            "更新全局配置: max_curr={}, auto_start={}, auto_upload={}, log_level={}, cover_match_path={}, ai_enabled={}, ai_base_url={}, ai_model={}",
+            max_curr,
+            auto_start,
+            auto_upload,
+            log_level,
+            cover_match_path,
+            ai.enabled,
+            ai.base_url,
+            ai.model
         );
         self.max_curr = max_curr;
         self.auto_start = auto_start;
         self.auto_upload = auto_upload;
         self.log_level = log_level;
         self.cover_match_path = cover_match_path;
+        self.ai = ai;
 
         self
     }
@@ -458,6 +505,7 @@ impl Default for ConfigRoot {
             auto_upload: true,
             log_level: default_log_level(),
             cover_match_path: String::new(),
+            ai: AiConfig::default(),
             user_order: Vec::new(),
             config: HashMap::new(),
         }

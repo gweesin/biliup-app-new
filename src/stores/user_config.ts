@@ -71,6 +71,24 @@ interface UserConfig {
     template_updated_at: Record<string, number>
 }
 
+// AI 服务（OpenAI 兼容接口）配置
+export interface AiConfig {
+    enabled: boolean
+    base_url: string
+    api_key: string
+    model: string
+    ffmpeg_path: string
+}
+
+// 默认 AI 配置
+export const createDefaultAiConfig = (): AiConfig => ({
+    enabled: false,
+    base_url: 'https://api.openai.com/v1',
+    api_key: '',
+    model: '',
+    ffmpeg_path: ''
+})
+
 // 配置根接口
 interface ConfigRoot {
     max_curr: number
@@ -78,6 +96,7 @@ interface ConfigRoot {
     auto_start: boolean
     log_level: string
     cover_match_path: string
+    ai: AiConfig
     config: Record<number, UserConfig> // uid -> 用户配置
 }
 
@@ -371,6 +390,7 @@ export const useUserConfigStore = defineStore('userConfig', () => {
                 auto_upload: true,
                 log_level: 'info',
                 cover_match_path: '',
+                ai: createDefaultAiConfig(),
                 config: {}
             }
         }
@@ -660,7 +680,7 @@ export const useUserConfigStore = defineStore('userConfig', () => {
         updates: Partial<
             Pick<
                 ConfigRoot,
-                'max_curr' | 'auto_upload' | 'auto_start' | 'log_level' | 'cover_match_path'
+                'max_curr' | 'auto_upload' | 'auto_start' | 'log_level' | 'cover_match_path' | 'ai'
             >
         >
     ) => {
@@ -671,13 +691,22 @@ export const useUserConfigStore = defineStore('userConfig', () => {
         // 更新全局配置
         Object.assign(configRoot.value, updates)
 
+        const ai = configRoot.value.ai || createDefaultAiConfig()
+
         try {
             await invoke('save_global_config', {
                 maxCurr: configRoot.value.max_curr,
                 autoStart: configRoot.value.auto_start,
                 autoUpload: configRoot.value.auto_upload,
                 logLevel: configRoot.value.log_level,
-                coverMatchPath: configRoot.value.cover_match_path || ''
+                coverMatchPath: configRoot.value.cover_match_path || '',
+                ai: {
+                    enabled: ai.enabled,
+                    base_url: ai.base_url || '',
+                    api_key: ai.api_key || '',
+                    model: ai.model || '',
+                    ffmpeg_path: ai.ffmpeg_path || ''
+                }
             })
             // 保存配置
             await saveConfig()

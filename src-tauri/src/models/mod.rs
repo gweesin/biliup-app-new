@@ -5,4 +5,6 @@ pub mod user_config;
 
 pub use upload_task::*;
 pub use user::*;
-pub use user_config::{ConfigRoot, Subtitle, TemplateConfig, UserConfig, UserInfo, VideoInfo};
+pub use user_config::{
+    AiConfig, ConfigRoot, Subtitle, TemplateConfig, UserConfig, UserInfo, VideoInfo,
+};

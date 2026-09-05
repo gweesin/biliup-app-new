@@ -3,7 +3,11 @@ use tauri::Manager;
 
 use tracing::info;
 
-use crate::{AppData, error::AppError, models::ConfigRoot};
+use crate::{
+    AppData,
+    error::AppError,
+    models::{AiConfig, ConfigRoot},
+};
 use crate::{models::TemplateConfig, utils::get_config_json_path};
 
 /// 加载配置文件
@@ -58,6 +62,7 @@ pub async fn save_global_config(
     auto_upload: bool,
     log_level: String,
     cover_match_path: String,
+    ai: AiConfig,
 ) -> Result<bool, AppError> {
     let app_data = app.state::<AppData>();
 
@@ -69,6 +74,7 @@ pub async fn save_global_config(
         auto_upload,
         log_level,
         cover_match_path,
+        ai,
     );
 
     app_data.upload_service.set_max_concurrent(max_curr).await;
