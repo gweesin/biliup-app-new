@@ -330,16 +330,18 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
     });
 
     // 思考模式（DeepSeek 等接口）：显式下发 thinking 参数开启。
-    // 图片提取类任务推理点有限：默认 reasoning_effort=high 会把大量输出预算花在
-    // 与任务无关的思考上（如分析图片格式），导致正文长度不足甚至为空。
-    // 因此默认用 low 缩短思考，把预算留给正文；同时也放宽 max_tokens 兜底。
+    // 提示词要求模型先在脑中构思 5 个方向再做取舍，需要较充足的思考预算；
+    // 且思考模式下一部分输出预算会被 reasoning_content 占用，max_tokens 过小
+    // 容易导致"只返回思考内容、正文为空"。故把 max_tokens 放宽到 8000，
+    // 使思考 + 正文的总预算足够宽裕（8000 是 DeepSeek 兼容接口常见的单次输出上限，
+    // 部分第三方中转支持更高，若仍提示长度不足可继续上调）。
     // 注意：这些参数非 OpenAI 标准，不支持的接口请在「全局设置 → AI 设置」中关闭思考模式
     if ai.thinking {
         let effort = normalize_reasoning_effort(&ai.reasoning_effort);
         body["thinking"] = json!({ "type": "enabled" });
         body["reasoning_effort"] = json!(effort);
-        body["max_tokens"] = json!(2000);
-        info!("AI 请求已开启思考模式 (thinking=enabled, reasoning_effort={effort}, max_tokens=2000)");
+        body["max_tokens"] = json!(8000);
+        info!("AI 请求已开启思考模式 (thinking=enabled, reasoning_effort={effort}, max_tokens=8000)");
     }
 
     let client = reqwest::Client::builder()
