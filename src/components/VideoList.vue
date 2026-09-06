@@ -227,6 +227,13 @@
                             </div>
                         </div>
 
+                        <!-- AI 深度思考过程（类 DeepSeek 折叠面板） -->
+                        <AiReasoningPanel
+                            v-if="aiReasonStates[video.id]"
+                            :reasoning="aiReasonStates[video.id].reasoning"
+                            :thinking="aiReasonStates[video.id].thinking"
+                        />
+
                         <!-- 每个视频独立封面设置 -->
                         <div class="video-cover-row">
                             <CoverUploader
@@ -318,9 +325,10 @@ import {
 import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore, createEmptyTitleAffix } from '../stores/user_config'
 import type { TitleAffix } from '../stores/user_config'
-import { useUtilsStore } from '../stores/utils'
+import { useUtilsStore, AI_TITLE_PROMPT } from '../stores/utils'
 import FloderWatch from './FloderWatch.vue'
 import CoverUploader from './CoverUploader.vue'
+import AiReasoningPanel from './AiReasoningPanel.vue'
 import { isVideoReadyForSeparateSubmit, getSeparateSubmitBlockReason } from '../utils/videoSubmit'
 
 // Props
@@ -371,6 +379,58 @@ const utilsStore = useUtilsStore()
 // 记录所有正在生成的视频 id：不同视频的任务互不阻塞、可并行执行，
 // 只有对应视频自己的图标显示 loading
 const aiGeneratingVideoIds = ref<Set<string>>(new Set())
+
+// ---- AI 深度思考过程展示（reasoning 流式回显）----
+// 每个视频 id 对应一条状态：reasoning 为已累积的思考文本，thinking 表示流式进行中。
+// IPC 通道回调频率较高，先累积到 pendingReasoning 再节流批量刷新，避免高频整表重渲染。
+interface AiReasonState {
+    reasoning: string
+    thinking: boolean
+}
+const aiReasonStates = ref<Record<string, AiReasonState>>({})
+const pendingReasoning = new Map<string, string>()
+let reasonFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+const flushReasoningNow = () => {
+    if (reasonFlushTimer !== null) {
+        clearTimeout(reasonFlushTimer)
+        reasonFlushTimer = null
+    }
+    if (pendingReasoning.size === 0) return
+    const deltas = new Map(pendingReasoning)
+    pendingReasoning.clear()
+    const next = { ...aiReasonStates.value }
+    for (const [id, delta] of deltas) {
+        const cur = next[id]
+        if (cur) {
+            next[id] = { ...cur, reasoning: cur.reasoning + delta }
+        }
+    }
+    aiReasonStates.value = next
+}
+
+const scheduleReasonFlush = () => {
+    if (reasonFlushTimer !== null) return
+    reasonFlushTimer = setTimeout(() => {
+        reasonFlushTimer = null
+        flushReasoningNow()
+    }, 60)
+}
+
+// 记录某条视频生成的思考增量（由通道回调触发）
+const appendReasoningDelta = (videoId: string, delta: string) => {
+    if (!delta) return
+    pendingReasoning.set(videoId, (pendingReasoning.get(videoId) || '') + delta)
+    scheduleReasonFlush()
+}
+
+const clearReasonState = (videoId: string) => {
+    pendingReasoning.delete(videoId)
+    if (!aiReasonStates.value[videoId]) return
+    const next = { ...aiReasonStates.value }
+    delete next[videoId]
+    aiReasonStates.value = next
+}
 
 // 文件夹监控对话框状态
 const showFolderWatchDialog = ref(false)
@@ -667,6 +727,10 @@ onUnmounted(() => {
     if (timeUpdateTimer) {
         clearInterval(timeUpdateTimer)
     }
+    if (reasonFlushTimer !== null) {
+        clearTimeout(reasonFlushTimer)
+        reasonFlushTimer = null
+    }
 })
 
 // 实时更新的视频数据计算属性
@@ -863,16 +927,33 @@ const handleAiGenerateTitle = async (video: any) => {
         )
         return
     }
+
+    // 思考模式开启时后端走 SSE 流式，把推理过程增量回传展示；
+    // 未开启时模型不会返回 reasoning，走一次性请求即可
+    const aiConfig = userConfigStore.configRoot?.ai
+    const wantThinking = !!(aiConfig && aiConfig.thinking)
+
     aiGeneratingVideoIds.value.add(video.id)
+    // 先展示「深度思考中」面板
+    aiReasonStates.value = {
+        ...aiReasonStates.value,
+        [video.id]: { reasoning: '', thinking: true }
+    }
+    pendingReasoning.delete(video.id)
+
+    // 兜底保留：请求结束后（无论成败）统一结算 reasoning 面板
+    let finalReasoning = ''
+    let keepReason = false
     try {
-        const title = await utilsStore.generateAiTitle(localPath)
-        const newTitle = String(title || '')
+        const result = await utilsStore.generateAiTitle(
+            localPath,
+            AI_TITLE_PROMPT,
+            wantThinking ? (delta: string) => appendReasoningDelta(video.id, delta) : undefined
+        )
+        const newTitle = String(result?.title || '')
             .trim()
             .slice(0, 80)
-        if (!newTitle) {
-            utilsStore.showMessage('AI 未返回有效标题，请稍后重试', 'warning')
-            return
-        }
+        finalReasoning = String(result?.reasoning || '').trim()
         // 并行任务可能在同一时间返回：等父组件把已完成的标题同步回 props，
         // 再基于最新的 videos 更新，避免并发结果互相覆盖
         await nextTick()
@@ -885,12 +966,28 @@ const handleAiGenerateTitle = async (video: any) => {
             }
             return item
         })
+        if (!newTitle) {
+            utilsStore.showMessage('AI 未返回有效标题，请稍后重试', 'warning')
+            return
+        }
         emit('update:videos', newVideos)
         utilsStore.showMessage(`已应用 AI 标题：${newTitle}`, 'success')
+        // 仅成功且确实有思考内容时保留面板
+        keepReason = finalReasoning.length > 0
     } catch (error) {
         utilsStore.showMessage(`AI 生成标题失败: ${error}`, 'error')
     } finally {
         aiGeneratingVideoIds.value.delete(video.id)
+        // 先把尚未落盘的增量刷入，再以接口返回的完整 reasoning 为准收尾
+        flushReasoningNow()
+        if (keepReason) {
+            aiReasonStates.value = {
+                ...aiReasonStates.value,
+                [video.id]: { reasoning: finalReasoning, thinking: false }
+            }
+        } else {
+            clearReasonState(video.id)
+        }
     }
 }
 
@@ -1145,6 +1242,7 @@ const getVideoWarningTooltip = (video: any): string => {
 
 // 处理删除文件
 const handleRemoveFile = (id: string) => {
+    clearReasonState(id)
     emit('removeFile', id)
 }
 

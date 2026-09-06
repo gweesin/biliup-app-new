@@ -1,8 +1,11 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::Manager;
+use tauri::ipc::Channel;
 use tracing::{error, info};
 
 use crate::error::AppError;
@@ -13,13 +16,25 @@ use crate::{AppData, models::AiConfig};
 // 提示词内容由前端传入（见 src/stores/utils.ts 的 AI_TITLE_PROMPT），
 // 修改提示词无需重新编译 Rust；前端在调用 generate_ai_title 时作为 prompt 参数下发。
 
+/// AI 生成结果：标题 + 深度思考过程（reasoning_content，可能为空）
+#[derive(Debug, Clone, Serialize)]
+pub struct AiTitleResult {
+    pub title: String,
+    pub reasoning: String,
+}
+
 /// 截取视频（倒数第三秒）画面并请求 AI 生成一个标题
+///
+/// 开启「思考模式」时本命令走 SSE 流式请求，并通过 `on_reasoning` 通道把
+/// reasoning_content 增量实时回传（payload: `{ "type": "reasoning", "text": "..." }`）；
+/// 前端据此在视频条目内展示类 DeepSeek 的「深度思考」过程。
 #[tauri::command]
 pub async fn generate_ai_title(
     app: tauri::AppHandle,
     video_path: String,
     prompt: String,
-) -> Result<String, AppError> {
+    on_reasoning: Channel<Value>,
+) -> Result<AiTitleResult, AppError> {
     let video_path = video_path.trim().to_string();
     if video_path.is_empty() || !Path::new(&video_path).is_file() {
         return Err(AppError::Custom("视频文件不存在或路径无效".to_string()));
@@ -27,7 +42,8 @@ pub async fn generate_ai_title(
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
         return Err(AppError::Custom(
-            "AI 提示词为空：请升级前端版本后重试（提示词由前端传入，Rust 侧已不内置）。".to_string(),
+            "AI 提示词为空：请升级前端版本后重试（提示词由前端传入，Rust 侧已不内置）。"
+                .to_string(),
         ));
     }
 
@@ -64,11 +80,21 @@ pub async fn generate_ai_title(
         return Err(AppError::Custom("截取视频画面失败，输出为空".to_string()));
     }
     let data_url = format!("data:image/jpeg;base64,{}", encode_base64(&frame_bytes));
-    info!("视频画面截取成功 ({}), {} 字节", time_desc, frame_bytes.len());
+    info!(
+        "视频画面截取成功 ({}), {} 字节",
+        time_desc,
+        frame_bytes.len()
+    );
 
-    // 3. 请求 OpenAI 兼容的视觉接口，取 AI 生成的单个标题
-    let title = request_ai_title(&ai, data_url, prompt).await?;
-    Ok(title)
+    // 3. 请求 OpenAI 兼容的视觉接口。
+    //    开启思考模式 → SSE 流式，把推理过程实时回传 on_reasoning 通道；
+    //    未开启（模型本身不会返回 reasoning）→ 一次性请求，仅在结果中带回 reasoning。
+    let (title, reasoning) = if ai.thinking {
+        request_ai_title_streaming(&ai, data_url, prompt, on_reasoning).await?
+    } else {
+        request_ai_title_once(&ai, data_url, prompt).await?
+    };
+    Ok(AiTitleResult { title, reasoning })
 }
 
 /// 校验 AI 配置是否完整可用
@@ -113,23 +139,18 @@ fn build_chat_endpoint(base_url: &str) -> String {
     format!("{base}/chat/completions")
 }
 
-/// 请求 OpenAI 兼容视觉接口，返回 AI 生成的单个标题
-async fn request_ai_title(
+/// 构建 OpenAI 兼容 chat/completions 的请求体
+fn build_request_payload(
     ai: &AiConfig,
     image_data_url: String,
     prompt: String,
-) -> Result<String, AppError> {
-    let endpoint = build_chat_endpoint(&ai.base_url);
-    if endpoint.is_empty() {
-        return Err(AppError::Custom("AI 接口地址无效".to_string()));
-    }
-
+    stream: bool,
+) -> Value {
     let mut body = json!({
         "model": ai.model.trim(),
         // 创意写作区间，让模型自行发散：越高越跳脱，越低越稳定
         "temperature": 1.2,
-        // 显式关闭流式，避免个别端点默认返回 SSE
-        "stream": false,
+        "stream": stream,
         "messages": [
             {
                 "role": "user",
@@ -153,15 +174,25 @@ async fn request_ai_title(
         body["reasoning_effort"] = json!(effort);
         // 不限制 max_tokens：不显式设置输出长度上限，交由接口/模型侧自行决定，
         // 避免思考模式下因硬性截断只返回 reasoning 而没有正文
-        info!("AI 请求已开启思考模式 (thinking=enabled, reasoning_effort={effort}, 不限制 max_tokens)");
+        info!(
+            "AI 请求已开启思考模式 (thinking=enabled, reasoning_effort={effort}, 不限制 max_tokens, stream={stream})"
+        );
     }
+    body
+}
 
+/// 创建 HTTP 客户端并发送请求（120s 超时，透传 api_key 做 Bearer 鉴权）
+async fn send_ai_request(
+    ai: &AiConfig,
+    endpoint: &str,
+    body: &Value,
+) -> Result<reqwest::Response, AppError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| AppError::Custom(format!("创建 HTTP 客户端失败: {e}")))?;
 
-    let mut request = client.post(&endpoint).json(&body);
+    let mut request = client.post(endpoint).json(body);
     let api_key = ai.api_key.trim();
     if !api_key.is_empty() {
         request = request.bearer_auth(api_key);
@@ -170,15 +201,30 @@ async fn request_ai_title(
     info!(
         "请求 AI 接口: {endpoint}, 模型: {}, 请求数据: {}",
         ai.model.trim(),
-        summarize_request_body(&body)
+        summarize_request_body(body)
     );
-    let response = match request.send().await {
-        Ok(resp) => resp,
+    match request.send().await {
+        Ok(resp) => Ok(resp),
         Err(e) => {
             error!("请求 AI 接口失败: {e}");
-            return Err(AppError::Custom(format!("请求 AI 接口失败: {e}")));
+            Err(AppError::Custom(format!("请求 AI 接口失败: {e}")))
         }
-    };
+    }
+}
+
+/// 一次性（非流式）请求：等待完整 JSON 响应后返回 (标题, 完整思考内容)
+async fn request_ai_title_once(
+    ai: &AiConfig,
+    image_data_url: String,
+    prompt: String,
+) -> Result<(String, String), AppError> {
+    let endpoint = build_chat_endpoint(&ai.base_url);
+    if endpoint.is_empty() {
+        return Err(AppError::Custom("AI 接口地址无效".to_string()));
+    }
+
+    let body = build_request_payload(ai, image_data_url, prompt, false);
+    let response = send_ai_request(ai, &endpoint, &body).await?;
 
     let status = response.status();
     let text = match response.text().await {
@@ -222,13 +268,198 @@ async fn request_ai_title(
 
     // 解析出标题（兼容模型偶尔输出的列表/编号），只取第一条
     let titles = parse_titles(&content_text);
-    let title = titles.into_iter().next().filter(|t| !t.is_empty()).ok_or_else(|| {
-        AppError::Custom(format!(
-            "AI 未返回有效标题，原始回复: {}",
-            content_text.chars().take(300).collect::<String>()
-        ))
-    })?;
-    Ok(title)
+    let title = titles
+        .into_iter()
+        .next()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            AppError::Custom(format!(
+                "AI 未返回有效标题，原始回复: {}",
+                content_text.chars().take(300).collect::<String>()
+            ))
+        })?;
+    Ok((title, reasoning_text.unwrap_or_default()))
+}
+
+/// 在 SSE 字节流中查找事件结束符 \n\n 的位置（返回第二个 \n 的下标）
+fn find_sse_delimiter(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 1)
+}
+
+/// 从单个 SSE 事件里提取 reasoning / content 增量（优先流式 delta 字段，兼容整帧 message 兜底）
+fn extract_stream_deltas(parsed: &Value) -> (String, String) {
+    let pick = |paths: &[&str]| -> String {
+        paths
+            .iter()
+            .find_map(|path| parsed.pointer(path).and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    };
+    let reasoning = pick(&[
+        "/choices/0/delta/reasoning_content",
+        "/choices/0/message/reasoning_content",
+    ]);
+    let content = pick(&["/choices/0/delta/content", "/choices/0/message/content"]);
+    (reasoning, content)
+}
+
+/// 处理一个完整的 SSE 事件帧：聚合 reasoning/content，并通过通道把推理增量回传前端。
+/// 返回是否收到 [DONE]。
+fn handle_sse_event(
+    raw: &[u8],
+    channel: &Channel<Value>,
+    reasoning: &mut String,
+    content: &mut String,
+) -> bool {
+    let text = String::from_utf8_lossy(raw);
+    let mut data_lines: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim());
+        }
+    }
+    if data_lines.is_empty() {
+        return false;
+    }
+    let joined = data_lines.join("\n");
+    if joined.trim() == "[DONE]" {
+        return true;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(&joined) else {
+        // 无法解析的数据帧（心跳/注释等）直接忽略
+        return false;
+    };
+    let (reasoning_delta, content_delta) = extract_stream_deltas(&parsed);
+    if !reasoning_delta.is_empty() {
+        reasoning.push_str(&reasoning_delta);
+        // 通道已关闭（前端取消/切换页面）时忽略发送失败
+        let _ = channel.send(json!({ "type": "reasoning", "text": reasoning_delta }));
+    }
+    if !content_delta.is_empty() {
+        content.push_str(&content_delta);
+    }
+    false
+}
+
+/// SSE 流式请求：思考模式下把 reasoning_content 增量实时回传前端做「深度思考」展示，
+/// 结束后返回 (标题, 完整思考内容)
+async fn request_ai_title_streaming(
+    ai: &AiConfig,
+    image_data_url: String,
+    prompt: String,
+    channel: Channel<Value>,
+) -> Result<(String, String), AppError> {
+    let endpoint = build_chat_endpoint(&ai.base_url);
+    if endpoint.is_empty() {
+        return Err(AppError::Custom("AI 接口地址无效".to_string()));
+    }
+
+    let body = build_request_payload(ai, image_data_url, prompt, true);
+    let response = send_ai_request(ai, &endpoint, &body).await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        error!("AI 接口返回错误 (HTTP {status}), 完整响应: {text}");
+        let brief: String = text.chars().take(500).collect();
+        return Err(AppError::Custom(format!(
+            "AI 接口返回错误 (HTTP {status}): {brief}"
+        )));
+    }
+    info!("AI 流式连接成功 (HTTP {status})");
+
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut raw_body = String::new();
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    let mut done = false;
+
+    while !done {
+        match stream.next().await {
+            Some(Ok(bytes)) => {
+                buffer.extend_from_slice(&bytes);
+                // 完整保留原始响应，便于整段 JSON 兜底解析
+                raw_body.push_str(&String::from_utf8_lossy(&bytes));
+                // 一个 chunk 可能携带多个事件，逐个消费到缓冲区不足一个完整事件为止
+                loop {
+                    match find_sse_delimiter(&buffer) {
+                        Some(end) => {
+                            let event: Vec<u8> = buffer.drain(..=end).collect();
+                            if handle_sse_event(&event, &channel, &mut reasoning, &mut content) {
+                                done = true;
+                            }
+                        }
+                        None => break,
+                    }
+                    if done {
+                        break;
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                error!("读取 AI 流失败: {e}");
+                return Err(AppError::Custom(format!("读取 AI 流失败: {e}")));
+            }
+            // EOF：处理缓冲区里可能残留的最后一帧（个别流不以 \n\n 收尾）
+            None => {
+                if !buffer.is_empty() {
+                    raw_body.push_str(&String::from_utf8_lossy(&buffer));
+                    let tail = std::mem::take(&mut buffer);
+                    handle_sse_event(&tail, &channel, &mut reasoning, &mut content);
+                }
+                break;
+            }
+        }
+    }
+
+    // 个别网关会忽略 stream=true 直接返回整段 JSON（非 SSE）：作整段兜底解析
+    if reasoning.trim().is_empty() && content.trim().is_empty() && !raw_body.trim().is_empty() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(raw_body.trim()) {
+            let (c, r) = extract_message_content(&parsed);
+            if !c.trim().is_empty() {
+                content = c;
+                reasoning = r.unwrap_or_default();
+                info!("AI 网关未按 SSE 流式返回，已按整段 JSON 兜底解析成功");
+            }
+        }
+    }
+
+    let reasoning_out = reasoning.trim().to_string();
+    let content_out = content.trim().to_string();
+    if content_out.is_empty() {
+        if reasoning_out.is_empty() {
+            return Err(AppError::Custom(
+                "AI 流式返回异常：未收到任何内容。请检查模型是否支持图片输入与流式输出，\
+                 或在「全局设置 → AI 设置」中关闭思考模式后重试。"
+                    .to_string(),
+            ));
+        }
+        let brief: String = reasoning_out.chars().take(300).collect();
+        return Err(AppError::Custom(format!(
+            "AI 只返回了思考内容（reasoning）而没有正文，通常是接口侧的输出长度上限被耗尽。\
+             可在接口侧关闭思考模式或放宽输出限制后重试。思考片段: {brief}"
+        )));
+    }
+
+    let titles = parse_titles(&content_out);
+    let title = titles
+        .into_iter()
+        .next()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            AppError::Custom(format!(
+                "AI 未返回有效标题，原始回复: {}",
+                content_out.chars().take(300).collect::<String>()
+            ))
+        })?;
+
+    info!(
+        "AI 流式结束：思考内容 {} 字符, 标题: {title}",
+        reasoning_out.chars().count()
+    );
+    Ok((title, reasoning_out))
 }
 
 /// 生成用于日志输出的完整请求数据：将超长的 base64 图片 data_url 压缩为摘要，
@@ -236,15 +467,13 @@ async fn request_ai_title(
 fn summarize_request_body(body: &Value) -> String {
     let mut body = body.clone();
     let mask_image = |node: &mut Value| {
-        if let Some(url) = node
-            .pointer_mut("/image_url/url")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(url) = node.pointer_mut("/image_url/url").and_then(|v| v.as_str()) {
             if url.len() > 300 {
                 let (prefix, _) = url.split_at(url.len().min(60));
                 let total = url.len();
-                *node.pointer_mut("/image_url/url").unwrap() =
-                    json!(format!("{prefix}… [base64 图片, 共 {total} 字符, 日志中省略]"));
+                *node.pointer_mut("/image_url/url").unwrap() = json!(format!(
+                    "{prefix}… [base64 图片, 共 {total} 字符, 日志中省略]"
+                ));
             }
         }
     };
@@ -437,13 +666,17 @@ fn normalize_title(line: &str) -> Option<String> {
                 rest = &trimmed[first.len_utf8()..];
             }
             '(' | '（' => {
-                let is_numbered = trimmed.char_indices().skip(1).find(|(_, c)| *c == ')' || *c == '）')
+                let is_numbered = trimmed
+                    .char_indices()
+                    .skip(1)
+                    .find(|(_, c)| *c == ')' || *c == '）')
                     .map_or(false, |(pos, _)| {
                         trimmed[1..pos].trim().chars().all(|c| c.is_ascii_digit())
                     });
                 if is_numbered {
-                    if let Some((pos, _)) =
-                        trimmed.char_indices().find(|(_, c)| *c == ')' || *c == '）')
+                    if let Some((pos, _)) = trimmed
+                        .char_indices()
+                        .find(|(_, c)| *c == ')' || *c == '）')
                     {
                         rest = &trimmed[pos + 1..];
                     }
@@ -481,7 +714,14 @@ fn normalize_title(line: &str) -> Option<String> {
 
     // 过滤常见的引导性语句（如 “以下是为您生成的标题：xxx”），优先提取冒号后的实际内容
     const BOILERPLATE: [&str; 8] = [
-        "以下", "下面是", "为您生成", "为你生成", "希望这", "好的", "收到", "请选择",
+        "以下",
+        "下面是",
+        "为您生成",
+        "为你生成",
+        "希望这",
+        "好的",
+        "收到",
+        "请选择",
     ];
     if BOILERPLATE.iter().any(|p| result.starts_with(p)) {
         if let Some(idx) = result.find('：') {

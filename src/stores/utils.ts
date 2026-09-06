@@ -1,8 +1,20 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { ElMessage } from 'element-plus'
 import type { MentionUserGroup } from '../types/mention'
+
+/** Rust 端 generate_ai_title 返回的结构化结果 */
+export interface AiTitleResult {
+    title: string
+    reasoning: string
+}
+
+/** Rust 端通过 on_reasoning 通道实时回传的事件载荷 */
+export interface AiReasoningEvent {
+    type: 'reasoning'
+    text: string
+}
 
 /**
  * AI 标题生成的提示词，存放在前端以便直接修改（改动无需重新编译 Rust）。
@@ -205,20 +217,40 @@ export const useUtilsStore = defineStore('template', () => {
     }
 
     /**
-     * 请求 AI 生成标题：截取视频倒数第三秒画面提交视觉模型，返回单个标题
-     * 需先在全局设置中配置 AI 接口与 ffmpeg
+     * 请求 AI 生成标题：截取视频倒数第三秒画面提交视觉模型。
+     * 开启思考模式时，Rust 端会走 SSE 流式请求，通过 on_reasoning 通道把「深度思考」过程
+     * 增量实时回调（每次回调为一段新文本，直接追加展示即可）。
      * @param videoPath 本地视频文件路径
      * @param prompt 提示词，默认使用 AI_TITLE_PROMPT
+     * @param onReasoning 思考内容增量回调（可选）
      */
     const generateAiTitle = async (
         videoPath: string,
-        prompt: string = AI_TITLE_PROMPT
-    ): Promise<string> => {
+        prompt: string = AI_TITLE_PROMPT,
+        onReasoning?: (delta: string) => void
+    ): Promise<AiTitleResult> => {
+        const channel = new Channel<AiReasoningEvent>()
+        channel.onmessage = payload => {
+            if (
+                onReasoning &&
+                payload &&
+                payload.type === 'reasoning' &&
+                typeof payload.text === 'string' &&
+                payload.text
+            ) {
+                onReasoning(payload.text)
+            }
+        }
         try {
-            const title = await invoke<string>('generate_ai_title', { videoPath, prompt }).then(title => {
-                return title.replace(/梦(\*|·)/, '梦');
+            const result = await invoke<AiTitleResult>('generate_ai_title', {
+                videoPath,
+                prompt,
+                onReasoning: channel
             })
-            return title || ''
+            return {
+                title: String(result?.title || '').replace(/梦(\*|·)/, '梦'),
+                reasoning: String(result?.reasoning || '')
+            }
         } catch (error) {
             console.error('AI 生成标题失败:', error)
             throw error
