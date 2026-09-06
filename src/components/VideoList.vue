@@ -1,5 +1,67 @@
 <template>
     <div class="video-list-container">
+        <!-- 批量工具区：前缀/后缀、定时发布、标题排序 -->
+        <div v-if="videos && videos.length > 0" class="batch-rename-tools">
+            <div class="batch-rename-item">
+                <el-checkbox v-model="useUnifiedPrefix">添加前缀</el-checkbox>
+                <el-input
+                    v-if="useUnifiedPrefix"
+                    v-model="unifiedPrefixValue"
+                    size="small"
+                    class="batch-rename-input"
+                    placeholder="输入前缀"
+                    maxlength="80"
+                />
+            </div>
+            <div class="batch-rename-item">
+                <el-checkbox v-model="useUnifiedSuffix">添加后缀</el-checkbox>
+                <el-input
+                    v-if="useUnifiedSuffix"
+                    v-model="unifiedSuffixValue"
+                    size="small"
+                    class="batch-rename-input"
+                    placeholder="输入后缀"
+                    maxlength="80"
+                />
+            </div>
+            <div class="batch-rename-item schedule-item">
+                <span class="schedule-label">定时发布</span>
+                <el-date-picker
+                    v-model="scheduleStartDate"
+                    type="date"
+                    size="small"
+                    placeholder="选择开始日期"
+                    value-format="YYYY-MM-DD"
+                    :clearable="false"
+                    class="schedule-date-picker"
+                />
+                <el-input-number
+                    v-model="videosPerTimeSlot"
+                    :min="1"
+                    :max="99"
+                    size="small"
+                    controls-position="right"
+                    class="schedule-count-input"
+                />
+                <span class="schedule-tip">个/时段</span>
+            </div>
+            <div class="sort-tools">
+                <el-button
+                    size="small"
+                    @click="sortVideosByTitle('asc')"
+                    :disabled="!videos || videos.length < 2"
+                >
+                    标题正序
+                </el-button>
+                <el-button
+                    size="small"
+                    @click="sortVideosByTitle('desc')"
+                    :disabled="!videos || videos.length < 2"
+                >
+                    标题倒序
+                </el-button>
+            </div>
+        </div>
         <!-- 视频操作按钮组 -->
         <div class="video-buttons-group">
             <el-button type="primary" @click="$emit('selectVideo')" size="small">
@@ -225,68 +287,6 @@
                             <el-icon><delete /></el-icon>
                         </el-button>
                     </div>
-                </div>
-            </div>
-
-            <div class="batch-rename-tools">
-                <div class="batch-rename-item">
-                    <el-checkbox v-model="useUnifiedPrefix">添加前缀</el-checkbox>
-                    <el-input
-                        v-if="useUnifiedPrefix"
-                        v-model="unifiedPrefixValue"
-                        size="small"
-                        class="batch-rename-input"
-                        placeholder="输入前缀"
-                        maxlength="80"
-                    />
-                </div>
-                <div class="batch-rename-item">
-                    <el-checkbox v-model="useUnifiedSuffix">添加后缀</el-checkbox>
-                    <el-input
-                        v-if="useUnifiedSuffix"
-                        v-model="unifiedSuffixValue"
-                        size="small"
-                        class="batch-rename-input"
-                        placeholder="输入后缀"
-                        maxlength="80"
-                    />
-                </div>
-                <div class="batch-rename-item schedule-item">
-                    <span class="schedule-label">定时发布</span>
-                    <el-date-picker
-                        v-model="scheduleStartDate"
-                        type="date"
-                        size="small"
-                        placeholder="选择开始日期"
-                        value-format="YYYY-MM-DD"
-                        :clearable="false"
-                        class="schedule-date-picker"
-                    />
-                    <el-input-number
-                        v-model="videosPerTimeSlot"
-                        :min="1"
-                        :max="99"
-                        size="small"
-                        controls-position="right"
-                        class="schedule-count-input"
-                    />
-                    <span class="schedule-tip">个/时段</span>
-                </div>
-                <div class="sort-tools">
-                    <el-button
-                        size="small"
-                        @click="sortVideosByTitle('asc')"
-                        :disabled="!videos || videos.length < 2"
-                    >
-                        标题正序
-                    </el-button>
-                    <el-button
-                        size="small"
-                        @click="sortVideosByTitle('desc')"
-                        :disabled="!videos || videos.length < 2"
-                    >
-                        标题倒序
-                    </el-button>
                 </div>
             </div>
         </div>
@@ -802,7 +802,9 @@ const handleAiGenerateTitle = async (video: any) => {
     aiGeneratingVideoIds.value.add(video.id)
     try {
         const title = await utilsStore.generateAiTitle(localPath)
-        const newTitle = String(title || '').trim().slice(0, 80)
+        const newTitle = String(title || '')
+            .trim()
+            .slice(0, 80)
         if (!newTitle) {
             utilsStore.showMessage('AI 未返回有效标题，请稍后重试', 'warning')
             return
@@ -1189,11 +1191,12 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
 }
 
 .batch-rename-tools {
-    margin-top: 8px;
+    margin-bottom: 10px;
     display: flex;
     align-items: center;
     gap: 16px;
     padding: 0 4px;
+    flex-wrap: wrap;
 }
 
 .batch-rename-item {
@@ -1721,5 +1724,4 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
         transform: scale(1.05);
     }
 }
-
 </style>
