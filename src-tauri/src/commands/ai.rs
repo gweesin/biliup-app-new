@@ -1,15 +1,26 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tauri::Manager;
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::error::AppError;
 use crate::utils::crypto::encode_base64;
 use crate::{AppData, models::AiConfig};
+
+/// ffmpeg 串行执行队列：多个 AI 生成任务并发时，探测时长与截帧在此排队依次执行，
+/// 避免同时拉起多个 ffmpeg / ffprobe 进程抢占 CPU 与磁盘 IO。
+/// tokio 的 Mutex 是 FIFO 公平锁，先到的任务先执行。
+static FFMPEG_QUEUE: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn ffmpeg_queue() -> &'static Mutex<()> {
+    FFMPEG_QUEUE.get_or_init(|| Mutex::new(()))
+}
 
 // 提示词内容由前端传入（见 src/stores/utils.ts 的 AI_TITLE_PROMPT），
 // 修改提示词无需重新编译 Rust；前端在调用 generate_ai_title 时作为 prompt 参数下发。
@@ -47,13 +58,28 @@ pub async fn generate_ai_title(
     })?;
     info!("使用 ffmpeg: {}", ffmpeg.display());
 
-    // 2. 探测视频总时长（秒）
-    let duration = probe_video_duration(&ffmpeg, &video_path).await?;
-    info!("视频时长: {duration:.3}s, 路径: {video_path}");
+    // 2~3. 探测时长 + 截帧：进入 ffmpeg 串行队列，同一时刻只跑一个 ffmpeg / ffprobe 进程，
+    // 并发的 AI 生成任务在此依次排队（网络请求阶段仍然并行，不受影响）
+    let queue_wait_start = Instant::now();
+    let (target, frame_bytes) = {
+        let _queue_guard = ffmpeg_queue().lock().await;
+        let waited = queue_wait_start.elapsed();
+        if waited.as_millis() >= 200 {
+            info!(
+                "ffmpeg 队列等待 {:.3}s 后开始执行, 路径: {video_path}",
+                waited.as_secs_f64()
+            );
+        }
 
-    // 3. 截取倒数第三秒画面
-    let target = (duration - 3.0).max(0.0);
-    let frame_bytes = extract_frame(&ffmpeg, &video_path, target).await?;
+        // 探测视频总时长（秒）
+        let duration = probe_video_duration(&ffmpeg, &video_path).await?;
+        info!("视频时长: {duration:.3}s, 路径: {video_path}");
+
+        // 截取倒数第三秒画面
+        let target = (duration - 3.0).max(0.0);
+        let frame_bytes = extract_frame(&ffmpeg, &video_path, target).await?;
+        (target, frame_bytes)
+    };
     if frame_bytes.is_empty() {
         return Err(AppError::Custom("截取视频画面失败，输出为空".to_string()));
     }

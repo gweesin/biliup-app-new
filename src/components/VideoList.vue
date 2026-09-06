@@ -118,12 +118,12 @@
                                     <svg
                                         :class="[
                                             'ai-icon',
-                                            { 'is-generating': aiGeneratingVideoId === video.id }
+                                            { 'is-generating': aiGeneratingVideoIds.has(video.id) }
                                         ]"
                                         viewBox="0 0 16 16"
                                         xmlns="http://www.w3.org/2000/svg"
                                         :title="
-                                            aiGeneratingVideoId === video.id
+                                            aiGeneratingVideoIds.has(video.id)
                                                 ? 'AI 正在生成标题…'
                                                 : 'AI 一键生成标题（截取视频最后3秒画面）'
                                         "
@@ -364,10 +364,9 @@ const userConfigStore = useUserConfigStore()
 const utilsStore = useUtilsStore()
 
 // AI 标题生成状态（生成单个标题后自动应用）
-// 记录正在生成的视频 id，保证只有被点击的那个图标显示 loading
-const aiGeneratingVideoId = ref<string | null>(null)
-// 是否正在生成（同时只允许一个生成任务）
-const aiGenerating = computed(() => aiGeneratingVideoId.value !== null)
+// 记录所有正在生成的视频 id：不同视频的任务互不阻塞、可并行执行，
+// 只有对应视频自己的图标显示 loading
+const aiGeneratingVideoIds = ref<Set<string>>(new Set())
 
 // 文件夹监控对话框状态
 const showFolderWatchDialog = ref(false)
@@ -781,8 +780,9 @@ const isAiConfigured = (): boolean => {
 }
 
 // 触发 AI 一键生成标题：截取视频倒数第三秒画面提交模型，成功后自动应用
+// 不同视频之间互不阻塞、可并行执行；同一视频生成中重复点击会被忽略
 const handleAiGenerateTitle = async (video: any) => {
-    if (aiGenerating.value) {
+    if (aiGeneratingVideoIds.value.has(video.id)) {
         return
     }
     // 兜底：配置往返可能丢失 original_file_path，尝试从上传任务中取回本地路径
@@ -799,7 +799,7 @@ const handleAiGenerateTitle = async (video: any) => {
         )
         return
     }
-    aiGeneratingVideoId.value = video.id
+    aiGeneratingVideoIds.value.add(video.id)
     try {
         const title = await utilsStore.generateAiTitle(localPath)
         const newTitle = String(title || '').trim().slice(0, 80)
@@ -807,6 +807,9 @@ const handleAiGenerateTitle = async (video: any) => {
             utilsStore.showMessage('AI 未返回有效标题，请稍后重试', 'warning')
             return
         }
+        // 并行任务可能在同一时间返回：等父组件把已完成的标题同步回 props，
+        // 再基于最新的 videos 更新，避免并发结果互相覆盖
+        await nextTick()
         const newVideos = props.videos.map(item => {
             if (item.id === video.id) {
                 return {
@@ -821,7 +824,7 @@ const handleAiGenerateTitle = async (video: any) => {
     } catch (error) {
         utilsStore.showMessage(`AI 生成标题失败: ${error}`, 'error')
     } finally {
-        aiGeneratingVideoId.value = null
+        aiGeneratingVideoIds.value.delete(video.id)
     }
 }
 
