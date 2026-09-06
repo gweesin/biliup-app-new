@@ -116,10 +116,17 @@
                                     }}</span>
                                     <el-icon class="edit-icon"><edit /></el-icon>
                                     <svg
-                                        :class="['ai-icon', { 'is-generating': aiGenerating }]"
+                                        :class="[
+                                            'ai-icon',
+                                            { 'is-generating': aiGeneratingVideoId === video.id }
+                                        ]"
                                         viewBox="0 0 16 16"
                                         xmlns="http://www.w3.org/2000/svg"
-                                        :title="aiGenerating ? 'AI 正在生成标题…' : 'AI 一键生成标题（截取视频最后3秒画面）'"
+                                        :title="
+                                            aiGeneratingVideoId === video.id
+                                                ? 'AI 正在生成标题…'
+                                                : 'AI 一键生成标题（截取视频最后3秒画面）'
+                                        "
                                         @click.stop.prevent="handleAiGenerateTitle(video)"
                                     >
                                         <path d="M0 0h16v16H0z" fill="none" />
@@ -357,7 +364,10 @@ const userConfigStore = useUserConfigStore()
 const utilsStore = useUtilsStore()
 
 // AI 标题生成状态（生成单个标题后自动应用）
-const aiGenerating = ref(false)
+// 记录正在生成的视频 id，保证只有被点击的那个图标显示 loading
+const aiGeneratingVideoId = ref<string | null>(null)
+// 是否正在生成（同时只允许一个生成任务）
+const aiGenerating = computed(() => aiGeneratingVideoId.value !== null)
 
 // 文件夹监控对话框状态
 const showFolderWatchDialog = ref(false)
@@ -775,7 +785,9 @@ const handleAiGenerateTitle = async (video: any) => {
     if (aiGenerating.value) {
         return
     }
-    const localPath = video.original_file_path || video.path || ''
+    // 兜底：配置往返可能丢失 original_file_path，尝试从上传任务中取回本地路径
+    const taskVideoPath = uploadStore.getUploadTask(video.id)?.video?.path || ''
+    const localPath = video.original_file_path || video.path || taskVideoPath
     if (!localPath) {
         utilsStore.showMessage('该视频缺少本地源文件，AI 生成标题仅支持本地视频', 'warning')
         return
@@ -787,7 +799,7 @@ const handleAiGenerateTitle = async (video: any) => {
         )
         return
     }
-    aiGenerating.value = true
+    aiGeneratingVideoId.value = video.id
     try {
         const title = await utilsStore.generateAiTitle(localPath)
         const newTitle = String(title || '').trim().slice(0, 80)
@@ -809,7 +821,7 @@ const handleAiGenerateTitle = async (video: any) => {
     } catch (error) {
         utilsStore.showMessage(`AI 生成标题失败: ${error}`, 'error')
     } finally {
-        aiGenerating.value = false
+        aiGeneratingVideoId.value = null
     }
 }
 

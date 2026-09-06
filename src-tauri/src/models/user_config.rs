@@ -1,6 +1,7 @@
 use anyhow::Result;
 use biliup::credential::LoginInfo;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -71,6 +72,15 @@ pub struct VideoInfo {
     pub encoding_status: i64,
     #[serde(default)]
     pub status_desc: String,
+    /// 原始本地文件路径：上传完成后 path 会被清空，此字段保留原始路径，
+    /// 供 AI 截帧、稿件发布成功后删除源文件等场景使用
+    #[serde(default)]
+    pub original_file_path: String,
+    /// 透传保存前端使用的其它扩展字段（cover / complete / status / errorMessage 等）。
+    /// 配置读取与保存会经过「反序列化 → 序列化」的往返，未知字段默认会被丢弃，
+    /// 用 flatten 收集可避免这些字段在保存后丢失
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

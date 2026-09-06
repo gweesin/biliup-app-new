@@ -32,5 +32,7 @@
 ## 开发注意事项
 - 修改 Rust 端配置字段需同步：`user_config.rs`（模型+Default+save_global_config）→ `commands/config.rs` → `src/stores/user_config.ts`（接口+updateGlobalConfig）→ `GlobalConfig.vue`。
 - 新增 Tauri 命令需在 `src-tauri/src/lib.rs` 的 invoke_handler 中注册。
+- **模板视频字段持久化（2026-09-06 踩坑）**：配置保存/读取会经 Rust「反序列化 → 序列化」往返，前端 `videos` 里的自定义字段（如 `original_file_path`、`cover`、`complete` 等）只要 `models/user_config.rs` 的 `VideoInfo` 未声明就会被丢弃（表现为「切换模板后字段消失」）。现已给 `VideoInfo` 增加显式字段 `original_file_path: String` 与 `#[serde(flatten)] extra: HashMap<String, Value>` 兜底所有扩展字段；新增需持久的前端视频字段请显式加到 `VideoInfo`（构造点仅有 `utils/compatible.rs` 旧配置迁移一处）。
+- 提交兼容性：`submit` → `into_bilibili_form` 用 `json!(videos)` 序列化后反序列化为 biliup 的 `Studio`，未知字段会被忽略，因此 `extra` 不会真正提交给 B 站。
 - dialog 权限（`dialog:default`、`dialog:allow-open`）已配置在 capabilities/default.json。
 - 构建检查：前端 `npx vue-tsc --noEmit`；Rust `cargo check`。

@@ -150,6 +150,8 @@ impl CompatibilityConverter {
                             finished_at: 0,      // 旧版配置没有finished_at字段，默认0
                             encoding_status: 0,  // 旧版配置没有encoding_status字段，默认0
                             status_desc: String::new(), // 旧版配置没有status_desc字段，留空
+                            original_file_path: String::new(), // 旧版配置没有该字段，留空
+                            extra: HashMap::new(),
                         });
                     }
                     vids
