@@ -184,6 +184,7 @@ impl CompatibilityConverter {
                 staff: None,  // 旧版配置没有staff字段
                 state: None,
                 state_desc: None,
+                title_affix: None, // 旧版配置没有title_affix字段
             };
 
             template.insert(streamer_name, template_config);

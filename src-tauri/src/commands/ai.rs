@@ -309,17 +309,12 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
         return Err(AppError::Custom("AI 接口地址无效".to_string()));
     }
 
-    let body = json!({
+    let mut body = json!({
         "model": ai.model.trim(),
         // 创意写作区间，让模型自行发散：越高越跳脱，越低越稳定
         "temperature": 1.2,
-        // 鼓励引入新表达、抑制重复套话（DeepSeek 等 OpenAI 兼容接口均支持）
-        "presence_penalty": 0.5,
-        "frequency_penalty": 0.3,
         // 显式关闭流式，避免个别端点默认返回 SSE
         "stream": false,
-        // 注：不显式下发 max_tokens，部分新版模型端点仅支持 max_completion_tokens，
-        // 交由服务端默认输出长度控制，避免思考型模型的正文被截断
         "messages": [
             {
                 "role": "user",
@@ -333,6 +328,15 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
             }
         ]
     });
+
+    // 思考模式（DeepSeek 等接口）：显式下发 thinking 参数开启。
+    // 思考会占用大量输出 token，同时放宽 max_tokens，避免思维链把正文挤没。
+    // 注意：该参数非 OpenAI 标准，不支持的接口请在「全局设置 → AI 设置」中关闭思考模式
+    if ai.thinking {
+        body["thinking"] = json!({ "type": "enabled" });
+        body["max_tokens"] = json!(2000);
+        info!("AI 请求已开启思考模式 (thinking=enabled, max_tokens=2000)");
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))

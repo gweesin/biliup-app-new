@@ -9,7 +9,7 @@
 ## 全局配置字段
 - `max_curr`（最大并发任务数）、`auto_upload`、`auto_start`、`log_level`。
 - `cover_match_path`（封面匹配路径，String，2026-08-23 新增）：存放封面图片的文件夹路径，用于按标题关键字自动匹配封面。
-- `ai`（AiConfig 对象，2026-09-05 新增）：`{ enabled, base_url, api_key, model, ffmpeg_path }`，OpenAI 兼容接口配置，默认 base_url=`https://api.openai.com/v1`。
+- `ai`（AiConfig 对象，2026-09-05 新增）：`{ enabled, base_url, api_key, model, ffmpeg_path, thinking }`，OpenAI 兼容接口配置，默认 base_url=`https://api.openai.com/v1`，`thinking` 默认 true（2026-09-06 新增，serde default 为 `default_true`）。
 
 ## AI 标题生成功能（2026-09-05 实现，2026-09-06 改为单标题自动应用）
 - `GlobalConfig.vue`：新增"AI 设置"分区（开启开关、Base URL、API Key 密码框、模型名、ffmpeg 路径+选择文件按钮）。

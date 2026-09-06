@@ -136,6 +136,20 @@
                 <div class="form-tip">需要支持图片输入（视觉）的模型</div>
             </el-form-item>
 
+            <!-- 思考模式 -->
+            <el-form-item label="思考模式">
+                <el-switch
+                    v-model="configForm.ai_thinking"
+                    active-text="开启"
+                    inactive-text="关闭"
+                    :disabled="!configForm.ai_enabled"
+                />
+                <div class="form-tip">
+                    适用于 DeepSeek 等支持 thinking 参数的接口，开启后模型会先思考再产出标题；
+                    其他服务（如 OpenAI）请关闭，否则可能因未知参数报错
+                </div>
+            </el-form-item>
+
             <!-- ffmpeg 路径 -->
             <el-form-item label="ffmpeg 路径">
                 <div class="ffmpeg-path-container">
@@ -335,6 +349,7 @@ interface GlobalConfigForm {
     ai_api_key: string
     ai_model: string
     ai_ffmpeg_path: string
+    ai_thinking: boolean
 }
 
 // Props
@@ -394,7 +409,8 @@ const defaultGlobalConfigForm = (): GlobalConfigForm => ({
     ai_base_url: 'https://api.openai.com/v1',
     ai_api_key: '',
     ai_model: '',
-    ai_ffmpeg_path: ''
+    ai_ffmpeg_path: '',
+    ai_thinking: true
 })
 
 const configForm = ref<GlobalConfigForm>(defaultGlobalConfigForm())
@@ -465,7 +481,8 @@ const loadGlobalConfig = async () => {
                 ai_base_url: ai.base_url || 'https://api.openai.com/v1',
                 ai_api_key: ai.api_key || '',
                 ai_model: ai.model || '',
-                ai_ffmpeg_path: ai.ffmpeg_path || ''
+                ai_ffmpeg_path: ai.ffmpeg_path || '',
+                ai_thinking: ai.thinking ?? true
             }
 
             // 保存原始配置
@@ -504,7 +521,8 @@ const handleSave = async () => {
                 base_url: configForm.value.ai_base_url.trim(),
                 api_key: configForm.value.ai_api_key.trim(),
                 model: configForm.value.ai_model.trim(),
-                ffmpeg_path: configForm.value.ai_ffmpeg_path.trim()
+                ffmpeg_path: configForm.value.ai_ffmpeg_path.trim(),
+                thinking: configForm.value.ai_thinking
             }
         })
 
@@ -676,7 +694,8 @@ const hasUnsavedChanges = (): boolean => {
         configForm.value.ai_base_url !== originalConfig.value.ai_base_url ||
         configForm.value.ai_api_key !== originalConfig.value.ai_api_key ||
         configForm.value.ai_model !== originalConfig.value.ai_model ||
-        configForm.value.ai_ffmpeg_path !== originalConfig.value.ai_ffmpeg_path
+        configForm.value.ai_ffmpeg_path !== originalConfig.value.ai_ffmpeg_path ||
+        configForm.value.ai_thinking !== originalConfig.value.ai_thinking
     )
 }
 

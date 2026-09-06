@@ -83,6 +83,29 @@ pub struct VideoInfo {
     pub extra: HashMap<String, Value>,
 }
 
+/// 视频标题批量前 / 后缀配置（随模板一起持久化）
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct TitleAffix {
+    /// 是否启用前缀
+    #[serde(default)]
+    pub use_prefix: bool,
+    /// 前缀内容
+    #[serde(default)]
+    pub prefix: String,
+    /// 是否启用后缀
+    #[serde(default)]
+    pub use_suffix: bool,
+    /// 后缀内容
+    #[serde(default)]
+    pub suffix: String,
+    /// 已实际写入视频标题的前缀，变更时先按此值剥离旧前缀
+    #[serde(default)]
+    pub applied_prefix: String,
+    /// 已实际写入视频标题的后缀，变更时先按此值剥离旧后缀
+    #[serde(default)]
+    pub applied_suffix: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateConfig {
     #[serde(default)]
@@ -157,6 +180,9 @@ pub struct TemplateConfig {
     pub state: Option<i64>,
     #[serde(default)]
     pub state_desc: Option<String>,
+    /// 批量前 / 后缀设置，属于本地配置，不会提交给 B 站
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_affix: Option<TitleAffix>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +224,10 @@ pub struct AiConfig {
     /// ffmpeg 可执行文件路径，留空时自动在 PATH 与常见目录中查找
     #[serde(default)]
     pub ffmpeg_path: String,
+    /// 是否开启思考模式（DeepSeek 等支持 thinking 参数的接口）。
+    /// 开启后模型会先输出思维链再给出正文，需要预留足够的输出预算
+    #[serde(default = "default_true")]
+    pub thinking: bool,
 }
 
 impl Default for AiConfig {
@@ -208,12 +238,17 @@ impl Default for AiConfig {
             api_key: String::new(),
             model: String::new(),
             ffmpeg_path: String::new(),
+            thinking: true,
         }
     }
 }
 
 fn default_ai_base_url() -> String {
     "https://api.openai.com/v1".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -653,6 +688,7 @@ impl Default for TemplateConfig {
             staff: None,
             state: None,
             state_desc: None,
+            title_affix: None,
         }
     }
 }

@@ -317,6 +317,7 @@ import {
 } from '@element-plus/icons-vue'
 import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore } from '../stores/user_config'
+import type { TitleAffix } from '../stores/user_config'
 import { useUtilsStore } from '../stores/utils'
 import FloderWatch from './FloderWatch.vue'
 import CoverUploader from './CoverUploader.vue'
@@ -334,6 +335,8 @@ interface Props {
     lastPublishTime?: number
     /** 是否处于多稿件提交模式（用于提示未就绪视频） */
     separateSubmitting?: boolean
+    /** 当前模板已保存的批量前/后缀配置（v-model:title-affix 双向绑定） */
+    titleAffix?: TitleAffix | null
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -353,6 +356,7 @@ const emit = defineEmits<{
     createUpload: []
     addVideosToForm: [videos: any[]]
     submitTemplate: [mode?: 'single' | 'multi', options?: { auto?: boolean }]
+    'update:titleAffix': [affix: TitleAffix]
 }>()
 
 // 文件编辑状态

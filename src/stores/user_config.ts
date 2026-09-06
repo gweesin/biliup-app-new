@@ -19,6 +19,26 @@ export interface DescV2Item {
     sub_biz_id: string
 }
 
+// 视频标题批量前 / 后缀配置（随模板一起保存，仅本地使用）
+export interface TitleAffix {
+    use_prefix: boolean
+    prefix: string
+    use_suffix: boolean
+    suffix: string
+    applied_prefix: string
+    applied_suffix: string
+}
+
+// 空的前 / 后缀配置
+export const createEmptyTitleAffix = (): TitleAffix => ({
+    use_prefix: false,
+    prefix: '',
+    use_suffix: false,
+    suffix: '',
+    applied_prefix: '',
+    applied_suffix: ''
+})
+
 // 模板配置接口
 export interface TemplateConfig {
     copyright: number // 1: 自制, 2: 转载
@@ -57,6 +77,8 @@ export interface TemplateConfig {
     staff?: Array<{ title: string; mid: number; is_del: number }>
     state?: number
     state_desc?: string
+    /** 批量前 / 后缀设置，随模板保存，不提交给 B 站 */
+    title_affix?: TitleAffix
 }
 
 interface UserConfig {
@@ -78,6 +100,8 @@ export interface AiConfig {
     api_key: string
     model: string
     ffmpeg_path: string
+    /** 是否开启思考模式（DeepSeek 等支持 thinking 参数的接口） */
+    thinking: boolean
 }
 
 // 默认 AI 配置
@@ -86,7 +110,8 @@ export const createDefaultAiConfig = (): AiConfig => ({
     base_url: 'https://api.openai.com/v1',
     api_key: '',
     model: '',
-    ffmpeg_path: ''
+    ffmpeg_path: '',
+    thinking: true
 })
 
 // 配置根接口
