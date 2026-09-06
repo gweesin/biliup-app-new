@@ -83,6 +83,27 @@
                 加入上传队列
             </el-button>
             <el-button
+                size="small"
+                class="batch-ai-btn"
+                :loading="aiBatchRunning"
+                :disabled="!videos || videos.length === 0"
+                @click="handleAiBatchGenerateTitle"
+            >
+                <svg
+                    v-if="!aiBatchRunning"
+                    class="batch-ai-icon"
+                    viewBox="0 0 16 16"
+                    xmlns="http://www.w3.org/2000/svg"
+                >
+                    <path d="M0 0h16v16H0z" fill="none" />
+                    <path
+                        fill="currentColor"
+                        d="M5.465 9.83a.92.92 0 0 0 1.07 0a1 1 0 0 0 .341-.46l.347-1.067a1.7 1.7 0 0 1 1.078-1.078l1.086-.354a.923.923 0 0 0-.037-1.75l-1.069-.346a1.7 1.7 0 0 1-1.08-1.078l-.353-1.084a.92.92 0 0 0-.869-.61a.92.92 0 0 0-.875.624l-.356 1.09A1.71 1.71 0 0 1 3.7 4.775l-1.084.351a.923.923 0 0 0 .013 1.745l1.067.347a1.71 1.71 0 0 1 1.081 1.083l.352 1.08a.92.92 0 0 0 .337.449M4.007 6.264L3.152 6l.864-.28a2.7 2.7 0 0 0 1.045-.66a2.76 2.76 0 0 0 .644-1.056l.265-.859l.28.862a2.7 2.7 0 0 0 1.718 1.715l.88.27l-.86.28A2.7 2.7 0 0 0 6.27 7.986l-.265.857l-.279-.859a2.7 2.7 0 0 0-1.719-1.72m6.527 7.587A.8.8 0 0 0 11 14a.81.81 0 0 0 .759-.55l.248-.761a1.09 1.09 0 0 1 .68-.681l.772-.252a.8.8 0 0 0-.023-1.52l-.764-.25a1.08 1.08 0 0 1-.68-.678l-.252-.774a.8.8 0 0 0-1.518.011l-.247.762a1.07 1.07 0 0 1-.664.679l-.776.253a.8.8 0 0 0-.388 1.222c.099.14.239.244.4.3l.763.247a1.06 1.06 0 0 1 .68.683l.253.774a.8.8 0 0 0 .292.387m-.914-2.793L9.442 11l.184-.064a2.09 2.09 0 0 0 1.3-1.317l.058-.178l.06.181a2.08 2.08 0 0 0 1.316 1.316l.195.064l-.18.059a2.08 2.08 0 0 0-1.317 1.32l-.059.181l-.058-.18a2.07 2.07 0 0 0-1.32-1.322"
+                    />
+                </svg>
+                {{ aiBatchRunning ? `AI 标题 ${aiBatchDone}/${aiBatchTotal}` : '批量 AI 标题' }}
+            </el-button>
+            <el-button
                 type="danger"
                 plain
                 @click="$emit('clearAllVideos')"
@@ -180,14 +201,17 @@
                                     <svg
                                         :class="[
                                             'ai-icon',
-                                            { 'is-generating': aiGeneratingVideoIds.has(video.id) }
+                                            { 'is-generating': aiGeneratingVideoIds.has(video.id) },
+                                            { 'is-batch-running': aiBatchRunning }
                                         ]"
                                         viewBox="0 0 16 16"
                                         xmlns="http://www.w3.org/2000/svg"
                                         :title="
-                                            aiGeneratingVideoIds.has(video.id)
-                                                ? 'AI 正在生成标题…'
-                                                : 'AI 一键生成标题（截取视频最后3秒画面）'
+                                            aiBatchRunning
+                                                ? '批量 AI 生成中，可稍后单独生成'
+                                                : aiGeneratingVideoIds.has(video.id)
+                                                  ? 'AI 正在生成标题…'
+                                                  : 'AI 一键生成标题（截取视频最后3秒画面）'
                                         "
                                         @click.stop.prevent="handleAiGenerateTitle(video)"
                                     >
@@ -379,6 +403,11 @@ const utilsStore = useUtilsStore()
 // 记录所有正在生成的视频 id：不同视频的任务互不阻塞、可并行执行，
 // 只有对应视频自己的图标显示 loading
 const aiGeneratingVideoIds = ref<Set<string>>(new Set())
+
+// 批量 AI 标题生成状态：运行中禁用顶部按钮，并把进度展示在按钮上
+const aiBatchRunning = ref(false)
+const aiBatchDone = ref(0)
+const aiBatchTotal = ref(0)
 
 // ---- AI 深度思考过程展示（reasoning 流式回显）----
 // 每个视频 id 对应一条状态：reasoning 为已累积的思考文本，thinking 表示流式进行中。
@@ -907,25 +936,28 @@ const isAiConfigured = (): boolean => {
     return !!ai && !!ai.enabled && !!ai.api_key && !!ai.model
 }
 
-// 触发 AI 一键生成标题：截取视频倒数第三秒画面提交模型，成功后自动应用
-// 不同视频之间互不阻塞、可并行执行；同一视频生成中重复点击会被忽略
-const handleAiGenerateTitle = async (video: any) => {
+// 对单个视频执行 AI 标题生成的核心逻辑（静默，不弹 toast）：
+// 内部维护 generating / 深度思考面板状态，返回本次运行结果供上层统一提示。
+// 单条与批量生成共用，避免两套逻辑漂移。
+type AiTitleRunStatus = 'applied' | 'empty' | 'failed' | 'skipped'
+interface AiTitleRunResult {
+    status: AiTitleRunStatus
+    title?: string
+    error?: string
+}
+const runAiTitleForVideo = async (
+    video: any,
+    options?: { onApplied?: (videoId: string, title: string) => void }
+): Promise<AiTitleRunResult> => {
+    // 同一视频正在生成（单条或批量任务已持有）：静默忽略，防重复
     if (aiGeneratingVideoIds.value.has(video.id)) {
-        return
+        return { status: 'skipped' }
     }
     // 兜底：配置往返可能丢失 original_file_path，尝试从上传任务中取回本地路径
     const taskVideoPath = uploadStore.getUploadTask(video.id)?.video?.path || ''
     const localPath = video.original_file_path || video.path || taskVideoPath
     if (!localPath) {
-        utilsStore.showMessage('该视频缺少本地源文件，AI 生成标题仅支持本地视频', 'warning')
-        return
-    }
-    if (!isAiConfigured()) {
-        utilsStore.showMessage(
-            '尚未配置 AI 服务，请先在「全局设置 → AI 设置」中开启并填写接口地址 / API Key / 模型',
-            'warning'
-        )
-        return
+        return { status: 'skipped' }
     }
 
     // 思考模式开启时后端走 SSE 流式，把推理过程增量回传展示；
@@ -944,6 +976,7 @@ const handleAiGenerateTitle = async (video: any) => {
     // 兜底保留：请求结束后（无论成败）统一结算 reasoning 面板
     let finalReasoning = ''
     let keepReason = false
+    let appliedTitle = ''
     try {
         const result = await utilsStore.generateAiTitle(
             localPath,
@@ -954,28 +987,34 @@ const handleAiGenerateTitle = async (video: any) => {
             .trim()
             .slice(0, 80)
         finalReasoning = String(result?.reasoning || '').trim()
-        // 并行任务可能在同一时间返回：等父组件把已完成的标题同步回 props，
-        // 再基于最新的 videos 更新，避免并发结果互相覆盖
-        await nextTick()
-        const newVideos = props.videos.map(item => {
-            if (item.id === video.id) {
-                return {
-                    ...item,
-                    title: newTitle
-                }
+        if (newTitle) {
+            // 并行任务可能在同一时间返回：等父组件把已完成的标题同步回 props，
+            // 再基于最新的 videos 更新，避免并发结果互相覆盖。
+            // 批量模式下外层会基于本地累积快照合并后统一 emit，逻辑更稳妥
+            await nextTick()
+            if (options?.onApplied) {
+                options.onApplied(video.id, newTitle)
+            } else {
+                const newVideos = props.videos.map(item => {
+                    if (item.id === video.id) {
+                        return {
+                            ...item,
+                            title: newTitle
+                        }
+                    }
+                    return item
+                })
+                emit('update:videos', newVideos)
             }
-            return item
-        })
-        if (!newTitle) {
-            utilsStore.showMessage('AI 未返回有效标题，请稍后重试', 'warning')
-            return
+            appliedTitle = newTitle
         }
-        emit('update:videos', newVideos)
-        utilsStore.showMessage(`已应用 AI 标题：${newTitle}`, 'success')
         // 仅成功且确实有思考内容时保留面板
-        keepReason = finalReasoning.length > 0
+        keepReason = !!appliedTitle && finalReasoning.length > 0
+        return appliedTitle ? { status: 'applied', title: appliedTitle } : { status: 'empty' }
     } catch (error) {
-        utilsStore.showMessage(`AI 生成标题失败: ${error}`, 'error')
+        const errorText = error instanceof Error ? error.message : String(error)
+        console.error('AI 生成标题失败:', error)
+        return { status: 'failed', error: errorText }
     } finally {
         aiGeneratingVideoIds.value.delete(video.id)
         // 先把尚未落盘的增量刷入，再以接口返回的完整 reasoning 为准收尾
@@ -988,6 +1027,118 @@ const handleAiGenerateTitle = async (video: any) => {
         } else {
             clearReasonState(video.id)
         }
+    }
+}
+
+// 触发 AI 一键生成标题：截取视频倒数第三秒画面提交模型，成功后自动应用
+// 不同视频之间互不阻塞、可并行执行；同一视频生成中重复点击会被忽略
+const handleAiGenerateTitle = async (video: any) => {
+    // 批量生成进行中时暂不响应单条触发，避免同一视频被重复处理
+    if (aiBatchRunning.value || aiGeneratingVideoIds.value.has(video.id)) {
+        return
+    }
+    // 兜底：配置往返可能丢失 original_file_path，尝试从上传任务中取回本地路径
+    const taskVideoPath = uploadStore.getUploadTask(video.id)?.video?.path || ''
+    const localPath = video.original_file_path || video.path || taskVideoPath
+    if (!localPath) {
+        utilsStore.showMessage('该视频缺少本地源文件，AI 生成标题仅支持本地视频', 'warning')
+        return
+    }
+    if (!isAiConfigured()) {
+        utilsStore.showMessage(
+            '尚未配置 AI 服务，请先在「全局设置 → AI 设置」中开启并填写接口地址 / API Key / 模型',
+            'warning'
+        )
+        return
+    }
+    const result = await runAiTitleForVideo(video)
+    if (result.status === 'applied') {
+        utilsStore.showMessage(`已应用 AI 标题：${result.title}`, 'success')
+    } else if (result.status === 'empty') {
+        utilsStore.showMessage('AI 未返回有效标题，请稍后重试', 'warning')
+    } else if (result.status === 'failed') {
+        utilsStore.showMessage(`AI 生成标题失败: ${result.error}`, 'error')
+    }
+}
+
+// 批量 AI 生成标题：只处理有本地源文件、且当前未在生成中的视频。
+// 固定 2 路并发（避免打爆接口限流，也让深度思考面板有节奏地逐个出现），
+// 逐条应用标题并更新进度，结束后只汇总提示一次。
+const handleAiBatchGenerateTitle = async () => {
+    if (aiBatchRunning.value) {
+        return
+    }
+    if (!props.videos || props.videos.length === 0) {
+        return
+    }
+    if (!isAiConfigured()) {
+        utilsStore.showMessage(
+            '尚未配置 AI 服务，请先在「全局设置 → AI 设置」中开启并填写接口地址 / API Key / 模型',
+            'warning'
+        )
+        return
+    }
+
+    // 过滤候选：需要有本地源文件、且当前未被单条/其它批量任务占用
+    const toRun = props.videos.filter(video => {
+        if (aiGeneratingVideoIds.value.has(video.id)) {
+            return false
+        }
+        const taskVideoPath = uploadStore.getUploadTask(video.id)?.video?.path || ''
+        const localPath = video.original_file_path || video.path || taskVideoPath
+        return !!localPath
+    })
+    const missingSourceCount = props.videos.length - toRun.length
+    if (toRun.length === 0) {
+        utilsStore.showMessage(
+            missingSourceCount > 0 ? '当前视频均缺少本地源文件或正在生成，无法批量处理' : '暂无可处理的视频',
+            'warning'
+        )
+        return
+    }
+
+    aiBatchRunning.value = true
+    aiBatchTotal.value = toRun.length
+    aiBatchDone.value = 0
+    const stats = { applied: 0, empty: 0, failed: 0, skipped: 0 }
+
+    // 基于本地累积快照逐条合并标题后再 emit，避免并发任务用过期 props 互相覆盖
+    let pendingVideos = [...props.videos]
+    const onApplied = (videoId: string, title: string) => {
+        pendingVideos = pendingVideos.map(item => (item.id === videoId ? { ...item, title } : item))
+        emit('update:videos', pendingVideos)
+    }
+
+    let nextIndex = 0
+    const workerCount = Math.min(2, toRun.length)
+    const runWorker = async () => {
+        while (nextIndex < toRun.length) {
+            const index = nextIndex++
+            const result = await runAiTitleForVideo(toRun[index], { onApplied })
+            if (result.status === 'applied') stats.applied++
+            else if (result.status === 'empty') stats.empty++
+            else if (result.status === 'failed') stats.failed++
+            else stats.skipped++
+            aiBatchDone.value = Math.min(toRun.length, aiBatchDone.value + 1)
+        }
+    }
+
+    try {
+        await Promise.all(Array.from({ length: workerCount }, () => runWorker()))
+    } finally {
+        aiBatchRunning.value = false
+    }
+
+    const parts = [`成功 ${stats.applied}`]
+    if (stats.empty) parts.push(`未返回标题 ${stats.empty}`)
+    if (stats.failed) parts.push(`失败 ${stats.failed}`)
+    if (stats.skipped) parts.push(`跳过 ${stats.skipped}`)
+    if (missingSourceCount) parts.push(`缺源跳过 ${missingSourceCount}`)
+    const summary = `批量 AI 标题：${parts.join('，')}`
+    if (stats.applied > 0) {
+        utilsStore.showMessage(summary, stats.failed > 0 ? 'warning' : 'success')
+    } else {
+        utilsStore.showMessage(`${summary}，请检查模型配置后重试`, 'warning')
     }
 }
 
@@ -1556,6 +1707,34 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     to {
         transform: rotate(360deg);
     }
+}
+
+/* 批量生成进行中：单条 sparkle 置灰，避免重复触发同一视频 */
+.ai-icon.is-batch-running {
+    color: #c0c4cc;
+    cursor: not-allowed;
+    pointer-events: none;
+    opacity: 0.45;
+}
+
+/* 批量 AI 标题按钮：紫色强调，与 sparkle 图标同一色系 */
+.batch-ai-btn {
+    --el-button-text-color: #722ed1;
+    --el-button-hover-text-color: #722ed1;
+    --el-button-active-text-color: #722ed1;
+    --el-button-bg-color: #f6f2fc;
+    --el-button-hover-bg-color: #efe8fa;
+    --el-button-active-bg-color: #e9e0f8;
+    --el-button-border-color: #d6c9ee;
+    --el-button-hover-border-color: #a98fe0;
+    --el-button-active-border-color: #a98fe0;
+}
+
+.batch-ai-icon {
+    width: 14px;
+    height: 14px;
+    margin-right: 5px;
+    vertical-align: -2px;
 }
 
 .video-title-edit {
