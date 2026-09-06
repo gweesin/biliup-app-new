@@ -316,7 +316,7 @@ import {
     VideoPause
 } from '@element-plus/icons-vue'
 import { useUploadStore } from '../stores/upload'
-import { useUserConfigStore } from '../stores/user_config'
+import { useUserConfigStore, createEmptyTitleAffix } from '../stores/user_config'
 import type { TitleAffix } from '../stores/user_config'
 import { useUtilsStore } from '../stores/utils'
 import FloderWatch from './FloderWatch.vue'
@@ -375,96 +375,128 @@ const aiGeneratingVideoIds = ref<Set<string>>(new Set())
 // 文件夹监控对话框状态
 const showFolderWatchDialog = ref(false)
 
-// 添加前缀 / 后缀：配置随模板一起保存（模板的 title_affix 字段）。
-// 界面上每次变更都会经 emit('update:titleAffix') 立即写回当前模板对象，
-// 保存模板时随配置落盘；切换模板/账号或数据重载时由 titleAffix prop 恢复对应模板的配置，
-// 因此在没有视频时也能看到当前模板是否配置了前/后缀
-interface AffixState {
-    usePrefix: boolean
-    prefixValue: string
-    useSuffix: boolean
-    suffixValue: string
-    lastAppliedPrefix: string
-    lastAppliedSuffix: string
-}
-const createEmptyAffixState = (): AffixState => ({
-    usePrefix: false,
-    prefixValue: '',
-    useSuffix: false,
-    suffixValue: '',
-    lastAppliedPrefix: '',
-    lastAppliedSuffix: ''
+// 添加前缀 / 后缀：界面读写直接绑定当前模板的 title_affix 字段，
+// 与 title/desc/videos 等字段一样随模板对象一起切换、随「保存模板」一起落盘。
+// 模板间天然隔离（各模板持有自己的 title_affix 对象），切换模板不会出现配置串用。
+const useUnifiedPrefix = computed<boolean>({
+    get: () => Boolean(props.titleAffix?.use_prefix),
+    set: enabled => setPrefixEnabled(enabled)
 })
-const useUnifiedPrefix = ref(false)
-const useUnifiedSuffix = ref(false)
-const unifiedPrefixValue = ref('')
-const unifiedSuffixValue = ref('')
-const lastAppliedPrefix = ref('')
-const lastAppliedSuffix = ref('')
-
-// 模板切换（恢复模板配置）期间置为 true，抑制各 watch 的连锁副作用
-let suppressAffixSideEffects = false
-
-const collectAffixState = (): AffixState => ({
-    usePrefix: useUnifiedPrefix.value,
-    prefixValue: unifiedPrefixValue.value,
-    useSuffix: useUnifiedSuffix.value,
-    suffixValue: unifiedSuffixValue.value,
-    lastAppliedPrefix: lastAppliedPrefix.value,
-    lastAppliedSuffix: lastAppliedSuffix.value
+const unifiedPrefixValue = computed<string>({
+    get: () => String(props.titleAffix?.prefix || ''),
+    set: value => setPrefixText(value)
+})
+const useUnifiedSuffix = computed<boolean>({
+    get: () => Boolean(props.titleAffix?.use_suffix),
+    set: enabled => setSuffixEnabled(enabled)
+})
+const unifiedSuffixValue = computed<string>({
+    get: () => String(props.titleAffix?.suffix || ''),
+    set: value => setSuffixText(value)
 })
 
-const applyAffixState = (state: AffixState) => {
-    useUnifiedPrefix.value = state.usePrefix
-    useUnifiedSuffix.value = state.useSuffix
-    unifiedPrefixValue.value = state.prefixValue
-    unifiedSuffixValue.value = state.suffixValue
-    lastAppliedPrefix.value = state.lastAppliedPrefix
-    lastAppliedSuffix.value = state.lastAppliedSuffix
+// 两个 title_affix 状态内容是否一致（避免无意义的重复写回）
+const isSameAffixState = (a?: TitleAffix | null, b?: TitleAffix | null): boolean => {
+    const na = a || createEmptyTitleAffix()
+    const nb = b || createEmptyTitleAffix()
+    return (
+        !!na.use_prefix === !!nb.use_prefix &&
+        (na.prefix || '') === (nb.prefix || '') &&
+        !!na.use_suffix === !!nb.use_suffix &&
+        (na.suffix || '') === (nb.suffix || '') &&
+        (na.applied_prefix || '') === (nb.applied_prefix || '') &&
+        (na.applied_suffix || '') === (nb.applied_suffix || '')
+    )
 }
 
-// TitleAffix（模板持久化结构）<=> AffixState（界面状态）互转
-const affixToState = (payload?: TitleAffix | null): AffixState => {
-    if (!payload) return createEmptyAffixState()
-    return {
-        usePrefix: !!payload.use_prefix,
-        prefixValue: String(payload.prefix || ''),
-        useSuffix: !!payload.use_suffix,
-        suffixValue: String(payload.suffix || ''),
-        lastAppliedPrefix: String(payload.applied_prefix || ''),
-        lastAppliedSuffix: String(payload.applied_suffix || '')
-    }
-}
-
-const stateToAffix = (state: AffixState): TitleAffix => ({
-    use_prefix: state.usePrefix,
-    prefix: state.prefixValue,
-    use_suffix: state.useSuffix,
-    suffix: state.suffixValue,
-    applied_prefix: state.lastAppliedPrefix,
-    applied_suffix: state.lastAppliedSuffix
-})
-
-const serializeAffixState = (state: AffixState): string =>
-    [
-        state.usePrefix ? 1 : 0,
-        state.prefixValue,
-        state.useSuffix ? 1 : 0,
-        state.suffixValue,
-        state.lastAppliedPrefix,
-        state.lastAppliedSuffix
-    ].join('\u0001')
-
-// 将当前界面状态写回模板（随后保存模板即持久化）；
-// 与模板已存状态一致时跳过，避免无谓地把模板标记为已修改；恢复配置期间不提交
-const commitAffixState = () => {
-    if (suppressAffixSideEffects) return
-    const next = stateToAffix(collectAffixState())
-    const saved = props.titleAffix ? affixToState(props.titleAffix) : null
-    if (saved && serializeAffixState(saved) === serializeAffixState(affixToState(next))) {
+// 把新状态写回当前模板（title_affix 尚未存在时基于空配置创建）
+const writeAffixState = (next: TitleAffix) => {
+    if (isSameAffixState(props.titleAffix, next)) {
         return
     }
     emit('update:titleAffix', next)
+}
+
+// 按 next 状态重写视频标题：先剥除 stripPrefix/stripSuffix（标题当前已带的前/后缀），
+// 再追加 next 中启用的前/后缀；标题有实际变化才更新 videos，并同步记录 applied_* 到模板
+const rewriteTitlesWithAffix = (
+    next: TitleAffix,
+    stripPrefix: string,
+    stripSuffix: string,
+    videos?: any[]
+) => {
+    const newPrefix = next.use_prefix ? next.prefix || '' : ''
+    const newSuffix = next.use_suffix ? next.suffix || '' : ''
+
+    const videoList = videos || []
+    let hasChanged = false
+    const newVideos = videoList.map(video => {
+        const currentName = String(video.title || video.videoname || '')
+        let baseName = currentName
+
+        if (stripPrefix && baseName.startsWith(stripPrefix)) {
+            baseName = baseName.slice(stripPrefix.length)
+        }
+        if (stripSuffix && baseName.endsWith(stripSuffix)) {
+            baseName = baseName.slice(0, baseName.length - stripSuffix.length)
+        }
+
+        const finalName = `${newPrefix}${baseName}${newSuffix}`.slice(0, 80)
+        if (finalName !== String(video.title || '')) {
+            hasChanged = true
+            return { ...video, title: finalName }
+        }
+        return video
+    })
+
+    if (hasChanged && videoList.length > 0) {
+        emit('update:videos', newVideos)
+    }
+    writeAffixState({ ...next, applied_prefix: newPrefix, applied_suffix: newSuffix })
+}
+
+// 勾选「添加前缀」：从现有标题自动识别公共前缀填入，并立即按该前缀应用一次；
+// 取消勾选：仅停止后续追加，不重写已写入的视频标题
+const setPrefixEnabled = (enabled: boolean) => {
+    const cur = props.titleAffix || createEmptyTitleAffix()
+    if (!enabled) {
+        writeAffixState({ ...cur, use_prefix: false, applied_prefix: '' })
+        return
+    }
+    const { prefix } = detectUnifiedAffixesFromVideos()
+    rewriteTitlesWithAffix(
+        { ...cur, use_prefix: true, prefix, applied_prefix: prefix },
+        prefix,
+        '',
+        props.videos
+    )
+}
+
+// 前缀文本变化（此时「添加前缀」已勾选）：基于上一次已应用的前缀剥离后重新应用
+const setPrefixText = (value: string) => {
+    const cur = props.titleAffix || createEmptyTitleAffix()
+    rewriteTitlesWithAffix({ ...cur, prefix: value }, cur.applied_prefix || '', '', props.videos)
+}
+
+const setSuffixEnabled = (enabled: boolean) => {
+    const cur = props.titleAffix || createEmptyTitleAffix()
+    if (!enabled) {
+        writeAffixState({ ...cur, use_suffix: false, applied_suffix: '' })
+        return
+    }
+    const { suffix } = detectUnifiedAffixesFromVideos()
+    rewriteTitlesWithAffix(
+        { ...cur, use_suffix: true, suffix, applied_suffix: suffix },
+        '',
+        suffix,
+        props.videos
+    )
+}
+
+// 后缀文本变化（此时「添加后缀」已勾选）：基于上一次已应用的后缀剥离后重新应用
+const setSuffixText = (value: string) => {
+    const cur = props.titleAffix || createEmptyTitleAffix()
+    rewriteTitlesWithAffix({ ...cur, suffix: value }, '', cur.applied_suffix || '', props.videos)
 }
 
 // 定时发布时间排布配置
@@ -876,49 +908,6 @@ const handleVideoCoverChange = (id: string, cover: string) => {
     emit('update:videos', newVideos)
 }
 
-const applyUnifiedNameAffixes = () => {
-    if (!props.videos || props.videos.length === 0) {
-        return
-    }
-
-    const nextPrefix = useUnifiedPrefix.value ? unifiedPrefixValue.value : ''
-    const nextSuffix = useUnifiedSuffix.value ? unifiedSuffixValue.value : ''
-    const previousPrefix = lastAppliedPrefix.value
-    const previousSuffix = lastAppliedSuffix.value
-
-    let hasChanged = false
-    const updated = props.videos.map(video => {
-        const currentName = String(video.title || video.videoname || '')
-        let baseName = currentName
-
-        if (previousPrefix && baseName.startsWith(previousPrefix)) {
-            baseName = baseName.slice(previousPrefix.length)
-        }
-
-        if (previousSuffix && baseName.endsWith(previousSuffix)) {
-            baseName = baseName.slice(0, baseName.length - previousSuffix.length)
-        }
-
-        const nextName = `${nextPrefix}${baseName}${nextSuffix}`.slice(0, 80)
-        if (nextName !== video.title) {
-            hasChanged = true
-            return {
-                ...video,
-                title: nextName
-            }
-        }
-
-        return video
-    })
-
-    lastAppliedPrefix.value = nextPrefix
-    lastAppliedSuffix.value = nextSuffix
-
-    if (hasChanged) {
-        emit('update:videos', updated)
-    }
-}
-
 const detectUnifiedAffixesFromVideos = () => {
     if (!props.videos || props.videos.length === 0) {
         return { prefix: '', suffix: '' }
@@ -984,78 +973,23 @@ const detectUnifiedAffixesFromVideos = () => {
     }
 }
 
-// 模板/账号切换或模板数据重载时，把对应模板已保存的前/后缀配置恢复到界面。
-// 该 watch 必须先于下方各 apply watch 注册，确保恢复完成后 videos 变化才会生效。
-watch(
-    () => (props.titleAffix ? JSON.stringify(props.titleAffix) : ''),
-    () => {
-        const nextState = affixToState(props.titleAffix)
-        if (serializeAffixState(nextState) === serializeAffixState(collectAffixState())) {
-            return
-        }
-        suppressAffixSideEffects = true
-        applyAffixState(nextState)
-        // pre 队列的 watch 会先于 nextTick 触发，故在下一轮再恢复副作用
-        nextTick(() => {
-            suppressAffixSideEffects = false
-        })
-    },
-    { immediate: true }
-)
-
-watch([unifiedPrefixValue, unifiedSuffixValue], () => {
-    if (suppressAffixSideEffects) return
-    if (useUnifiedPrefix.value || useUnifiedSuffix.value) {
-        applyUnifiedNameAffixes()
-    }
-    commitAffixState()
-})
-
-watch(useUnifiedPrefix, enabled => {
-    if (suppressAffixSideEffects) return
-    if (enabled) {
-        const { prefix } = detectUnifiedAffixesFromVideos()
-        unifiedPrefixValue.value = prefix
-        // 预置上次已应用值，避免勾选时把已存在前缀再次叠加
-        lastAppliedPrefix.value = prefix
-
-        applyUnifiedNameAffixes()
-        commitAffixState()
-        return
-    }
-
-    // 取消勾选时仅隐藏输入，不改动已写入的视频标题
-    lastAppliedPrefix.value = ''
-    commitAffixState()
-})
-
-watch(useUnifiedSuffix, enabled => {
-    if (suppressAffixSideEffects) return
-    if (enabled) {
-        const { suffix } = detectUnifiedAffixesFromVideos()
-        unifiedSuffixValue.value = suffix
-        // 预置上次已应用值，避免勾选时把已存在后缀再次叠加
-        lastAppliedSuffix.value = suffix
-
-        applyUnifiedNameAffixes()
-        commitAffixState()
-        return
-    }
-
-    // 取消勾选时仅隐藏输入，不改动已写入的视频标题
-    lastAppliedSuffix.value = ''
-    commitAffixState()
-})
-
+// 视频列表变化（新增/模板切换）时：若当前模板已启用前/后缀，
+// 对列表内尚未带上配置前缀/后缀的视频自动补齐（追加前缀）。
+// 标题与当前配置完全一致时不会产生任何写回，切换模板时读取的已是新模板的 title_affix
 watch(
     () =>
         props.videos.map(video => `${video.id}:${video.title || video.videoname || ''}`).join('|'),
     () => {
-        if (suppressAffixSideEffects) return
-        if (useUnifiedPrefix.value || useUnifiedSuffix.value) {
-            applyUnifiedNameAffixes()
+        const cur = props.titleAffix
+        if (!cur || (!cur.use_prefix && !cur.use_suffix)) {
+            return
         }
-        commitAffixState()
+        rewriteTitlesWithAffix(
+            cur,
+            cur.applied_prefix || '',
+            cur.applied_suffix || '',
+            props.videos
+        )
     }
 )
 
