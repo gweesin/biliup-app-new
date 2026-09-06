@@ -439,6 +439,7 @@
                                     <div v-show="!cardCollapsed.videos" class="card-content">
                                         <VideoList
                                             v-model:videos="videos"
+                                            v-model:title-affix="titleAffix"
                                             :is-drag-over="isDragOver"
                                             :uploading="uploading"
                                             :template-title="currentTemplateName"
@@ -934,6 +935,7 @@
 import { ref, onMounted, computed, watch, onUnmounted } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { useUserConfigStore } from '../stores/user_config'
+import type { TitleAffix } from '../stores/user_config'
 import { useUtilsStore } from '../stores/utils'
 import { useUploadStore } from '../stores/upload'
 import { ElMessageBox } from 'element-plus'
@@ -1223,6 +1225,18 @@ const videos = computed({
     set(value: any[]) {
         if (currentForm.value) {
             currentForm.value.videos = value
+        }
+    }
+})
+
+// 批量前/后缀配置的计算属性 - 双向绑定到当前模板的 title_affix 字段（随模板保存）
+const titleAffix = computed<TitleAffix | null | undefined>({
+    get() {
+        return currentForm.value?.title_affix
+    },
+    set(value) {
+        if (currentForm.value) {
+            currentForm.value.title_affix = value ?? undefined
         }
     }
 })
