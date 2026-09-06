@@ -58,7 +58,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import COVER_MATCH_KEYWORDS from '../constants/cover-match-keywords.json'
+import { isCoverImageMatched, matchCoverKeywords } from '../utils/coverMatch'
 import { useUtilsStore } from '../stores/utils'
 import { useUserConfigStore } from '../stores/user_config'
 
@@ -116,59 +116,6 @@ watch(
     { immediate: true }
 )
 
-// 关键字之间存在包含关系（如「姜维」⊂「梦姜维」），若只按子串判断会互相误命中。
-// 统一按“更长关键字优先（最具体优先）”处理：
-//   标题侧：某关键字的每次出现若都被更长的命中词覆盖，则视为冗余剔除；
-//   图片侧：文件名中被更长命中词包含的中间词不算独立命中，最终需与标题命中词相交。
-// 例：标题「梦姜维」只命中「梦姜维」，不再带出「姜维」封面；
-//     标题「姜维」也不会带出文件名含「梦姜维」的封面。
-
-// 标题中“独立出现”的关键字
-const extractIndependentCoverKeywords = (title: string): string[] => {
-    const hits = COVER_MATCH_KEYWORDS.filter(kw => kw && title.includes(kw))
-    return hits.filter(kw => {
-        const supers = hits.filter(other => other.length > kw.length && other.includes(kw))
-        if (supers.length === 0) {
-            return true
-        }
-        // 收集 kw 在标题中的所有出现位置
-        const positions: number[] = []
-        let pos = title.indexOf(kw)
-        while (pos !== -1) {
-            positions.push(pos)
-            pos = title.indexOf(kw, pos + kw.length)
-        }
-        // 只有 kw 的每次出现都落在某个更长命中词内时，才属于冗余命中
-        const allCovered = positions.every(start =>
-            supers.some(superKw => {
-                let supStart = title.indexOf(superKw)
-                while (supStart !== -1) {
-                    if (supStart <= start && start + kw.length <= supStart + superKw.length) {
-                        return true
-                    }
-                    supStart = title.indexOf(superKw, supStart + superKw.length)
-                }
-                return false
-            })
-        )
-        return !allCovered
-    })
-}
-
-// 文件名中“最具体”的关键字（剔除被更长命中词包含的中间词）
-const primaryKeywordsInImage = (name: string): string[] => {
-    const contained = COVER_MATCH_KEYWORDS.filter(kw => kw && name.includes(kw))
-    return contained.filter(
-        kw => !contained.some(other => other.length > kw.length && other.includes(kw))
-    )
-}
-
-// 图片是否真正匹配：文件名的最具体关键字需与标题命中关键字有交集
-const isImageMatched = (name: string, matchedKeywords: string[]): boolean => {
-    const primary = primaryKeywordsInImage(name)
-    return matchedKeywords.some(kw => primary.includes(kw))
-}
-
 // 根据标题匹配封面路径中的图片
 const refreshCoverMatch = async (title: string) => {
     // 清除旧定时器
@@ -185,8 +132,8 @@ const refreshCoverMatch = async (title: string) => {
         return
     }
 
-    // 提取标题中独立包含的关键字（长词优先，避免「梦姜维」标题同时命中「姜维」）
-    const matchedKeywords = extractIndependentCoverKeywords(title)
+    // 提取标题命中的正式关键字：长词优先，且别名（如「悟空」）会映射回正式关键字（如「孙桓」）
+    const matchedKeywords = matchCoverKeywords(title)
     if (matchedKeywords.length === 0) {
         coverMatchImages.value = []
         lastMatchKey = ''
@@ -209,7 +156,9 @@ const refreshCoverMatch = async (title: string) => {
                 keywords: matchedKeywords
             })
             // 后端按子串匹配，可能把文件名含更长「梦X」词的封面一并带出（如「姜维」命中「梦姜维.jpg」），这里再按文件名最具体关键字过滤
-            coverMatchImages.value = (images || []).filter(img => isImageMatched(img.name, matchedKeywords))
+            coverMatchImages.value = (images || []).filter(img =>
+                isCoverImageMatched(img.name, matchedKeywords)
+            )
         } catch (error) {
             console.error('匹配封面失败:', error)
             coverMatchImages.value = []
