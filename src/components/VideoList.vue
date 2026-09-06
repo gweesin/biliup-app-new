@@ -1,7 +1,7 @@
 <template>
     <div class="video-list-container">
-        <!-- 批量工具区：前缀/后缀、定时发布、标题排序 -->
-        <div v-if="videos && videos.length > 0" class="batch-rename-tools">
+        <!-- 批量工具区：前缀/后缀、定时发布、标题排序（无视频时也显示，便于确认当前模板的配置） -->
+        <div class="batch-rename-tools">
             <div class="batch-rename-item">
                 <el-checkbox v-model="useUnifiedPrefix">添加前缀</el-checkbox>
                 <el-input
@@ -317,6 +317,7 @@ import {
 } from '@element-plus/icons-vue'
 import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore } from '../stores/user_config'
+import type { TitleAffix } from '../stores/user_config'
 import { useUtilsStore } from '../stores/utils'
 import FloderWatch from './FloderWatch.vue'
 import CoverUploader from './CoverUploader.vue'
@@ -334,6 +335,8 @@ interface Props {
     lastPublishTime?: number
     /** 是否处于多稿件提交模式（用于提示未就绪视频） */
     separateSubmitting?: boolean
+    /** 当前模板已保存的批量前/后缀配置（v-model:title-affix 双向绑定） */
+    titleAffix?: TitleAffix | null
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -353,6 +356,7 @@ const emit = defineEmits<{
     createUpload: []
     addVideosToForm: [videos: any[]]
     submitTemplate: [mode?: 'single' | 'multi', options?: { auto?: boolean }]
+    'update:titleAffix': [affix: TitleAffix]
 }>()
 
 // 文件编辑状态
@@ -371,8 +375,10 @@ const aiGeneratingVideoIds = ref<Set<string>>(new Set())
 // 文件夹监控对话框状态
 const showFolderWatchDialog = ref(false)
 
-// 添加前缀 / 后缀：按「uid + 模板名」为维度隔离各模板的独立状态，
-// 避免切换模板时把上一个模板的前缀/后缀串用（自动应用）到其他模板上
+// 添加前缀 / 后缀：配置随模板一起保存（模板的 title_affix 字段）。
+// 界面上每次变更都会经 emit('update:titleAffix') 立即写回当前模板对象，
+// 保存模板时随配置落盘；切换模板/账号或数据重载时由 titleAffix prop 恢复对应模板的配置，
+// 因此在没有视频时也能看到当前模板是否配置了前/后缀
 interface AffixState {
     usePrefix: boolean
     prefixValue: string
@@ -396,12 +402,8 @@ const unifiedSuffixValue = ref('')
 const lastAppliedPrefix = ref('')
 const lastAppliedSuffix = ref('')
 
-const affixStateMap = new Map<string, AffixState>()
-// 模板切换（保存/恢复状态）期间置为 true，抑制各 watch 的连锁副作用
+// 模板切换（恢复模板配置）期间置为 true，抑制各 watch 的连锁副作用
 let suppressAffixSideEffects = false
-
-const getAffixTemplateKey = (): string =>
-    `${props.uid ?? ''}::${String(props.templateTitle || '').trim()}`
 
 const collectAffixState = (): AffixState => ({
     usePrefix: useUnifiedPrefix.value,
@@ -421,18 +423,48 @@ const applyAffixState = (state: AffixState) => {
     lastAppliedSuffix.value = state.lastAppliedSuffix
 }
 
-const saveAffixState = (key: string) => {
-    if (!key) return
-    affixStateMap.set(key, collectAffixState())
+// TitleAffix（模板持久化结构）<=> AffixState（界面状态）互转
+const affixToState = (payload?: TitleAffix | null): AffixState => {
+    if (!payload) return createEmptyAffixState()
+    return {
+        usePrefix: !!payload.use_prefix,
+        prefixValue: String(payload.prefix || ''),
+        useSuffix: !!payload.use_suffix,
+        suffixValue: String(payload.suffix || ''),
+        lastAppliedPrefix: String(payload.applied_prefix || ''),
+        lastAppliedSuffix: String(payload.applied_suffix || '')
+    }
 }
 
-const restoreAffixState = (key: string) => {
-    suppressAffixSideEffects = true
-    applyAffixState(affixStateMap.get(key) || createEmptyAffixState())
-    // pre 队列的 watch 会先于 nextTick 触发，故在下一轮再恢复副作用
-    nextTick(() => {
-        suppressAffixSideEffects = false
-    })
+const stateToAffix = (state: AffixState): TitleAffix => ({
+    use_prefix: state.usePrefix,
+    prefix: state.prefixValue,
+    use_suffix: state.useSuffix,
+    suffix: state.suffixValue,
+    applied_prefix: state.lastAppliedPrefix,
+    applied_suffix: state.lastAppliedSuffix
+})
+
+const serializeAffixState = (state: AffixState): string =>
+    [
+        state.usePrefix ? 1 : 0,
+        state.prefixValue,
+        state.useSuffix ? 1 : 0,
+        state.suffixValue,
+        state.lastAppliedPrefix,
+        state.lastAppliedSuffix
+    ].join('\u0001')
+
+// 将当前界面状态写回模板（随后保存模板即持久化）；
+// 与模板已存状态一致时跳过，避免无谓地把模板标记为已修改；恢复配置期间不提交
+const commitAffixState = () => {
+    if (suppressAffixSideEffects) return
+    const next = stateToAffix(collectAffixState())
+    const saved = props.titleAffix ? affixToState(props.titleAffix) : null
+    if (saved && serializeAffixState(saved) === serializeAffixState(affixToState(next))) {
+        return
+    }
+    emit('update:titleAffix', next)
 }
 
 // 定时发布时间排布配置
@@ -952,19 +984,31 @@ const detectUnifiedAffixesFromVideos = () => {
     }
 }
 
-// 切换模板（或账号）时：存档当前模板的前/后缀状态，再恢复目标模板的状态。
+// 模板/账号切换或模板数据重载时，把对应模板已保存的前/后缀配置恢复到界面。
 // 该 watch 必须先于下方各 apply watch 注册，确保恢复完成后 videos 变化才会生效。
-watch(getAffixTemplateKey, (newKey, oldKey) => {
-    if (newKey === oldKey) return
-    saveAffixState(oldKey)
-    restoreAffixState(newKey)
-})
+watch(
+    () => (props.titleAffix ? JSON.stringify(props.titleAffix) : ''),
+    () => {
+        const nextState = affixToState(props.titleAffix)
+        if (serializeAffixState(nextState) === serializeAffixState(collectAffixState())) {
+            return
+        }
+        suppressAffixSideEffects = true
+        applyAffixState(nextState)
+        // pre 队列的 watch 会先于 nextTick 触发，故在下一轮再恢复副作用
+        nextTick(() => {
+            suppressAffixSideEffects = false
+        })
+    },
+    { immediate: true }
+)
 
 watch([unifiedPrefixValue, unifiedSuffixValue], () => {
     if (suppressAffixSideEffects) return
     if (useUnifiedPrefix.value || useUnifiedSuffix.value) {
         applyUnifiedNameAffixes()
     }
+    commitAffixState()
 })
 
 watch(useUnifiedPrefix, enabled => {
@@ -976,11 +1020,13 @@ watch(useUnifiedPrefix, enabled => {
         lastAppliedPrefix.value = prefix
 
         applyUnifiedNameAffixes()
+        commitAffixState()
         return
     }
 
     // 取消勾选时仅隐藏输入，不改动已写入的视频标题
     lastAppliedPrefix.value = ''
+    commitAffixState()
 })
 
 watch(useUnifiedSuffix, enabled => {
@@ -992,11 +1038,13 @@ watch(useUnifiedSuffix, enabled => {
         lastAppliedSuffix.value = suffix
 
         applyUnifiedNameAffixes()
+        commitAffixState()
         return
     }
 
     // 取消勾选时仅隐藏输入，不改动已写入的视频标题
     lastAppliedSuffix.value = ''
+    commitAffixState()
 })
 
 watch(
@@ -1007,6 +1055,7 @@ watch(
         if (useUnifiedPrefix.value || useUnifiedSuffix.value) {
             applyUnifiedNameAffixes()
         }
+        commitAffixState()
     }
 )
 
