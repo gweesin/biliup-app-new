@@ -1,26 +1,14 @@
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tauri::Manager;
-use std::process::Stdio;
-use tokio::process::Command as TokioCommand;
-use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::error::AppError;
 use crate::utils::crypto::encode_base64;
+use crate::utils::ffmpeg::{capture_frame_near_end, ffmpeg_queue_lock, resolve_ffmpeg};
 use crate::{AppData, models::AiConfig};
-
-/// ffmpeg 串行执行队列：多个 AI 生成任务并发时，探测时长与截帧在此排队依次执行，
-/// 避免同时拉起多个 ffmpeg / ffprobe 进程抢占 CPU 与磁盘 IO。
-/// tokio 的 Mutex 是 FIFO 公平锁，先到的任务先执行。
-static FFMPEG_QUEUE: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn ffmpeg_queue() -> &'static Mutex<()> {
-    FFMPEG_QUEUE.get_or_init(|| Mutex::new(()))
-}
 
 // 提示词内容由前端传入（见 src/stores/utils.ts 的 AI_TITLE_PROMPT），
 // 修改提示词无需重新编译 Rust；前端在调用 generate_ai_title 时作为 prompt 参数下发。
@@ -58,11 +46,11 @@ pub async fn generate_ai_title(
     })?;
     info!("使用 ffmpeg: {}", ffmpeg.display());
 
-    // 2~3. 探测时长 + 截帧：进入 ffmpeg 串行队列，同一时刻只跑一个 ffmpeg / ffprobe 进程，
-    // 并发的 AI 生成任务在此依次排队（网络请求阶段仍然并行，不受影响）
+    // 2. 截取倒数第三秒画面：ffmpeg 调用进入串行队列，同一时刻只跑一个进程，
+    // 并发的 AI 生成任务在此排队（网络请求阶段仍然并行，不受影响）
     let queue_wait_start = Instant::now();
-    let (target, frame_bytes) = {
-        let _queue_guard = ffmpeg_queue().lock().await;
+    let (time_desc, frame_bytes) = {
+        let _queue_guard = ffmpeg_queue_lock().await;
         let waited = queue_wait_start.elapsed();
         if waited.as_millis() >= 200 {
             info!(
@@ -70,23 +58,15 @@ pub async fn generate_ai_title(
                 waited.as_secs_f64()
             );
         }
-
-        // 探测视频总时长（秒）
-        let duration = probe_video_duration(&ffmpeg, &video_path).await?;
-        info!("视频时长: {duration:.3}s, 路径: {video_path}");
-
-        // 截取倒数第三秒画面
-        let target = (duration - 3.0).max(0.0);
-        let frame_bytes = extract_frame(&ffmpeg, &video_path, target).await?;
-        (target, frame_bytes)
+        capture_frame_near_end(&ffmpeg, &video_path, 3.0).await?
     };
     if frame_bytes.is_empty() {
         return Err(AppError::Custom("截取视频画面失败，输出为空".to_string()));
     }
     let data_url = format!("data:image/jpeg;base64,{}", encode_base64(&frame_bytes));
-    info!("视频画面截取成功, {} 字节, 时间点 {target:.3}s", frame_bytes.len());
+    info!("视频画面截取成功 ({}), {} 字节", time_desc, frame_bytes.len());
 
-    // 4. 请求 OpenAI 兼容的视觉接口，取 AI 生成的单个标题
+    // 3. 请求 OpenAI 兼容的视觉接口，取 AI 生成的单个标题
     let title = request_ai_title(&ai, data_url, prompt).await?;
     Ok(title)
 }
@@ -114,192 +94,6 @@ fn check_ai_config(ai: &AiConfig) -> Result<(), AppError> {
         ));
     }
     Ok(())
-}
-
-/// 查找 ffmpeg 可执行文件：优先使用配置路径，其次搜索 PATH 与常见安装目录
-fn resolve_ffmpeg(configured: &str) -> Option<PathBuf> {
-    let configured = configured.trim();
-    if !configured.is_empty() {
-        let path = PathBuf::from(configured);
-        if path.is_file() {
-            return Some(path);
-        }
-        warn!("配置的 ffmpeg 路径无效，尝试自动搜索: {configured}");
-    }
-
-    let exe_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-
-    // 搜索系统 PATH
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join(exe_name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    // Windows 常见安装位置
-    #[cfg(windows)]
-    {
-        let mut candidates = vec![
-            PathBuf::from(r"C:\ffmpeg\bin").join(exe_name),
-            PathBuf::from(r"D:\ffmpeg\bin").join(exe_name),
-            PathBuf::from(r"C:\Program Files\ffmpeg\bin").join(exe_name),
-            PathBuf::from(r"C:\Program Files (x86)\ffmpeg\bin").join(exe_name),
-        ];
-        if let Ok(user_profile) = std::env::var("USERPROFILE") {
-            // Scoop / Chocolatey 等包管理器的常见安装位置
-            candidates.push(PathBuf::from(&user_profile).join("scoop/shims").join(exe_name));
-            candidates.push(
-                PathBuf::from(&user_profile)
-                    .join("scoop/apps/ffmpeg/current/bin")
-                    .join(exe_name),
-            );
-            candidates.push(
-                PathBuf::from(&user_profile)
-                    .join("AppData/Local/Microsoft/WinGet/Links")
-                    .join(exe_name),
-            );
-        }
-        for candidate in candidates {
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    // macOS / Linux 常见安装位置
-    #[cfg(not(windows))]
-    {
-        for candidate in [
-            "/usr/bin/ffmpeg",
-            "/usr/local/bin/ffmpeg",
-            "/opt/homebrew/bin/ffmpeg",
-            "/snap/bin/ffmpeg",
-        ] {
-            let path = PathBuf::from(candidate);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
-/// 执行外部进程并捕获 stdout / stderr
-async fn run_process(
-    program: &Path,
-    args: &[&str],
-    timeout_secs: u64,
-) -> Result<(Vec<u8>, String), AppError> {
-    let mut cmd = TokioCommand::new(program);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| AppError::Custom(format!("无法启动 {}: {e}", program.display())))?;
-
-    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-        .await
-        .map_err(|_| AppError::Custom(format!("{} 执行超时", program.display())))?
-        .map_err(|e| AppError::Custom(format!("执行 {} 失败: {e}", program.display())))?;
-
-    Ok((output.stdout, String::from_utf8_lossy(&output.stderr).into_owned()))
-}
-
-/// 探测视频时长（秒）。优先使用同目录 ffprobe，失败时解析 ffmpeg -i 输出
-async fn probe_video_duration(ffmpeg: &Path, video_path: &str) -> Result<f64, AppError> {
-    // 优先使用 ffprobe（通常与 ffmpeg 同目录安装）
-    let ffprobe = ffmpeg.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" });
-    if ffprobe.is_file() {
-        let (stdout, stderr) = run_process(
-            &ffprobe,
-            &[
-                "-v", "error", "-show_entries", "format=duration", "-of",
-                "default=noprint_wrappers=1:nokey=1", video_path,
-            ],
-            30,
-        )
-        .await?;
-        let text = String::from_utf8_lossy(&stdout).trim().to_string();
-        if let Ok(secs) = text.parse::<f64>() {
-            return Ok(secs);
-        }
-        warn!("ffprobe 解析时长失败: {text:?} | {stderr}");
-    }
-
-    // 回退：解析 ffmpeg -i 输出的 Duration 字段
-    let (_stdout, stderr) = run_process(ffmpeg, &["-hide_banner", "-i", video_path], 30).await?;
-    if let Some(secs) = parse_ffmpeg_duration(&stderr) {
-        return Ok(secs);
-    }
-
-    Err(AppError::Custom(
-        "无法获取视频时长（视频文件可能损坏或编码不受支持）。".to_string(),
-    ))
-}
-
-/// 从 ffmpeg -i 的 stderr 输出中解析 Duration: HH:MM:SS.xx
-fn parse_ffmpeg_duration(stderr: &str) -> Option<f64> {
-    const MARKER: &str = "Duration: ";
-    let pos = stderr.find(MARKER)?;
-    let rest = &stderr[pos + MARKER.len()..];
-    let token = rest.split(',').next().unwrap_or("").trim();
-    if token.is_empty() || token.eq_ignore_ascii_case("N/A") {
-        return None;
-    }
-
-    let parts: Vec<&str> = token.split(':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let hours: f64 = parts[0].trim().parse().ok()?;
-    let minutes: f64 = parts[1].trim().parse().ok()?;
-    let seconds: f64 = parts[2].trim().parse().ok()?;
-    Some(hours * 3600.0 + minutes * 60.0 + seconds)
-}
-
-/// 截取指定时间点的视频帧，返回 JPEG 图片字节
-async fn extract_frame(
-    ffmpeg: &Path,
-    video_path: &str,
-    at_second: f64,
-) -> Result<Vec<u8>, AppError> {
-    let seek_arg = format!("{at_second:.3}");
-    let (stdout, stderr) = run_process(
-        ffmpeg,
-        &[
-            "-y",
-            "-ss",
-            &seek_arg,
-            "-i",
-            video_path,
-            "-frames:v",
-            "1",
-            "-f",
-            "image2pipe",
-            "-c:v",
-            "mjpeg",
-            "-q:v",
-            "5",
-            "pipe:1",
-        ],
-        60,
-    )
-    .await?;
-
-    if stdout.is_empty() {
-        return Err(AppError::Custom(format!(
-            "截取视频画面失败: {}",
-            stderr.lines().next_back().unwrap_or("未知错误")
-        )));
-    }
-    Ok(stdout)
 }
 
 /// 拼接 OpenAI 兼容的 chat/completions 接口地址
