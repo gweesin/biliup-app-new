@@ -4,6 +4,27 @@ import { invoke } from '@tauri-apps/api/core'
 import { ElMessage } from 'element-plus'
 import type { MentionUserGroup } from '../types/mention'
 
+/**
+ * AI 标题生成的提示词，存放在前端以便直接修改（改动无需重新编译 Rust）。
+ * 需要调整标题风格/信息提取要求时，修改下面这段文本即可。
+ */
+export const AI_TITLE_PROMPT = `请处理这张 MOBA 游戏梦三国2的对局结算截图，完成信息提取，并自由创作一个战报标题。
+
+第一步 提取信息
+- 对局胜负结果与双方阵营的最终比分
+- 绿底高亮行对应的英雄名称（只取英雄名；英雄名多为三国人物名，带“梦”前缀时写作“梦许褚”这种形式，不要带玩家名）
+- 该英雄的 KDA（击杀 / 死亡 / 助攻）
+
+第二步 自由创作标题
+围绕英雄名创作 1 个最有冲击力、最适合游戏高光展示的标题：
+- 标题中必须出现英雄名
+- 切入角度、表达风格、句式结构、英雄名所在位置，全部由你自己决定，不要套用任何固定模板，也不要沿用你的第一反应句式
+- 先在脑中快速构思 3 个方向完全不同的标题（不同角度、不同语气、不同长度、不同修辞），再从中挑出最好的那一个
+- 允许口语、玩梗、夸张、古风、悬念、反差、第一人称等任意风格，只要不低俗、不误导
+- 可以结合对局结果、最终比分、英雄名、KDA 等信息
+
+只输出最终那 1 个标题文本，不要编号、不要引号、不要列表、不要任何解释或前后缀文字。`
+
 /** 稿件列表项（与后端 get_archives 命令返回结构对应） */
 export interface ArchiveListItem {
     aid: number
@@ -186,10 +207,17 @@ export const useUtilsStore = defineStore('template', () => {
     /**
      * 请求 AI 生成标题：截取视频倒数第三秒画面提交视觉模型，返回单个标题
      * 需先在全局设置中配置 AI 接口与 ffmpeg
+     * @param videoPath 本地视频文件路径
+     * @param prompt 提示词，默认使用 AI_TITLE_PROMPT
      */
-    const generateAiTitle = async (videoPath: string): Promise<string> => {
+    const generateAiTitle = async (
+        videoPath: string,
+        prompt: string = AI_TITLE_PROMPT
+    ): Promise<string> => {
         try {
-            const title = await invoke<string>('generate_ai_title', { videoPath })
+            const title = await invoke<string>('generate_ai_title', { videoPath, prompt }).then(title => {
+                return title.replace(/梦(\*|·)/, '梦');
+            })
             return title || ''
         } catch (error) {
             console.error('AI 生成标题失败:', error)

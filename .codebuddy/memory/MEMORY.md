@@ -13,7 +13,8 @@
 
 ## AI 标题生成功能（2026-09-05 实现，2026-09-06 改为单标题自动应用）
 - `GlobalConfig.vue`：新增"AI 设置"分区（开启开关、Base URL、API Key 密码框、模型名、ffmpeg 路径+选择文件按钮）。
-- Rust 命令 `generate_ai_title(video_path)`（`src-tauri/src/commands/ai.rs`，返回 `Result<String>`）：校验配置 → `resolve_ffmpeg`（配置路径→PATH→Windows 常见目录）→ ffprobe/ffmpeg 探测时长 → `ffmpeg -ss dur-3 -frames:v 1 -c:v mjpeg` 截帧 → 请求 `{base}/chat/completions` 视觉接口（Bearer，120s 超时，max_tokens 300，prompt 常量 AI_PROMPT 要求提取英雄+KDA 只生成 1 个标题）→ 解析回复（兼容 JSON 数组/编号行，取第一条）。
+- Rust 命令 `generate_ai_title(video_path, prompt)`（`src-tauri/src/commands/ai.rs`，返回 `Result<String>`）：校验配置 → `resolve_ffmpeg`（配置路径→PATH→Windows 常见目录）→ ffprobe/ffmpeg 探测时长 → `ffmpeg -ss dur-3 -frames:v 1 -c:v mjpeg` 截帧 → 请求 `{base}/chat/completions` 视觉接口（Bearer，120s 超时，temperature 1.2，stream false）→ 解析回复（`extract_message_content`，取 content 正文）。
+- 提示词迁移到前端（2026-09-06）：导出常量 `AI_TITLE_PROMPT`（`src/stores/utils.ts`，内容是梦三国2结算截图 → 提取胜负/比分/绿底行英雄/KDA → 自由创作 1 个 8-20 字含英雄名标题）；`generateAiTitle(videoPath, prompt = AI_TITLE_PROMPT)` 随 invoke 传给 Rust；Rust 端不内置提示词（删除了 AI_PROMPT 常量），prompt 为空返回明确错误。**改提示词只需改前端常量，无需重编 Rust**。
 - `VideoList.vue`：`.video-title` 末尾 sparkle svg（类 `.ai-icon`）→ 点击直接截帧请求，生成单个标题后自动通过 `emit('update:videos')` 回填 title 并 toast；生成中 svg 添加 `.is-generating` 旋转 loading（无候选对话框、无 `.ai-candidate-*`）。
 - 前端 store 方法：`utilsStore.generateAiTitle(videoPath): Promise<string>`。
 - 注意：AI 截帧依赖本机 ffmpeg；未配置/未安装时命令返回中文错误提示，需引导用户前往全局设置。

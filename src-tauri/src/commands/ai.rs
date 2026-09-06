@@ -11,34 +11,25 @@ use crate::error::AppError;
 use crate::utils::crypto::encode_base64;
 use crate::{AppData, models::AiConfig};
 
-/// 提交给 AI 的提示词：切入角度与表达风格完全交给模型自主决定，不预设固定模板
-const AI_PROMPT: &str = "请处理这张 MOBA 游戏梦三国2的对局结算截图，完成信息提取，并自由创作一个战报标题。
-
-第一步 提取信息
-- 对局胜负结果与双方阵营的最终比分
-- 绿底高亮行对应的英雄名称（只取英雄名；英雄名多为三国人物名，带“梦”前缀时写作“梦许褚”这种形式，不要带玩家名）
-- 该英雄的 KDA（击杀 / 死亡 / 助攻）
-
-第二步 自由创作标题
-围绕英雄名创作 1 个最有冲击力、最适合游戏高光展示的标题：
-- 切入角度、表达风格、句式结构、英雄名所在位置，全部由你自己决定，不要套用任何固定模板，也不要沿用你的第一反应句式
-- 先在脑中快速构思 5 个方向完全不同的标题（不同角度、不同语气、不同长度、不同修辞），再从中挑出最新鲜、最有画面感、最不像模板的那一个
-- 标题中必须出现英雄名，长度 8-20 字，简短有力，符合游戏社区的表达习惯，可结合当下热点话题吸引流量
-- 避免“秀翻全场”“碾压全场”“无人能敌”这类被用烂的空泛套话，也避免与常见游戏视频标题雷同
-- 允许口语、玩梗、夸张、古风、悬念、反差、第一人称等任意风格，只要不低俗、不误导
-- 可以结合对局结果、最终比分、英雄名、KDA 等信息
-
-只输出最终那 1 个标题文本，不要编号、不要引号、不要列表、不要任何解释或前后缀文字。";
+// 提示词内容由前端传入（见 src/stores/utils.ts 的 AI_TITLE_PROMPT），
+// 修改提示词无需重新编译 Rust；前端在调用 generate_ai_title 时作为 prompt 参数下发。
 
 /// 截取视频（倒数第三秒）画面并请求 AI 生成一个标题
 #[tauri::command]
 pub async fn generate_ai_title(
     app: tauri::AppHandle,
     video_path: String,
+    prompt: String,
 ) -> Result<String, AppError> {
     let video_path = video_path.trim().to_string();
     if video_path.is_empty() || !Path::new(&video_path).is_file() {
         return Err(AppError::Custom("视频文件不存在或路径无效".to_string()));
+    }
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err(AppError::Custom(
+            "AI 提示词为空：请升级前端版本后重试（提示词由前端传入，Rust 侧已不内置）。".to_string(),
+        ));
     }
 
     let ai = app.state::<AppData>().config.lock().await.ai.clone();
@@ -70,7 +61,7 @@ pub async fn generate_ai_title(
     info!("视频画面截取成功, {} 字节, 时间点 {target:.3}s", frame_bytes.len());
 
     // 4. 请求 OpenAI 兼容的视觉接口，取 AI 生成的单个标题
-    let title = request_ai_title(&ai, data_url).await?;
+    let title = request_ai_title(&ai, data_url, prompt).await?;
     Ok(title)
 }
 
@@ -303,7 +294,11 @@ fn build_chat_endpoint(base_url: &str) -> String {
 }
 
 /// 请求 OpenAI 兼容视觉接口，返回 AI 生成的单个标题
-async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<String, AppError> {
+async fn request_ai_title(
+    ai: &AiConfig,
+    image_data_url: String,
+    prompt: String,
+) -> Result<String, AppError> {
     let endpoint = build_chat_endpoint(&ai.base_url);
     if endpoint.is_empty() {
         return Err(AppError::Custom("AI 接口地址无效".to_string()));
@@ -319,7 +314,7 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
             {
                 "role": "user",
                 "content": [
-                    { "type": "text", "text": AI_PROMPT },
+                    { "type": "text", "text": prompt },
                     {
                         "type": "image_url",
                         "image_url": { "url": image_data_url }
