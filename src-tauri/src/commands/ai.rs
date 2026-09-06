@@ -330,18 +330,15 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
     });
 
     // 思考模式（DeepSeek 等接口）：显式下发 thinking 参数开启。
-    // 提示词要求模型先在脑中构思 5 个方向再做取舍，需要较充足的思考预算；
-    // 且思考模式下一部分输出预算会被 reasoning_content 占用，max_tokens 过小
-    // 容易导致"只返回思考内容、正文为空"。故把 max_tokens 放宽到 8000，
-    // 使思考 + 正文的总预算足够宽裕（8000 是 DeepSeek 兼容接口常见的单次输出上限，
-    // 部分第三方中转支持更高，若仍提示长度不足可继续上调）。
+    // 提示词要求模型先在脑中构思 5 个方向再做取舍，需要较充足的思考预算。
     // 注意：这些参数非 OpenAI 标准，不支持的接口请在「全局设置 → AI 设置」中关闭思考模式
     if ai.thinking {
         let effort = normalize_reasoning_effort(&ai.reasoning_effort);
         body["thinking"] = json!({ "type": "enabled" });
         body["reasoning_effort"] = json!(effort);
-        body["max_tokens"] = json!(8000);
-        info!("AI 请求已开启思考模式 (thinking=enabled, reasoning_effort={effort}, max_tokens=8000)");
+        // 不限制 max_tokens：不显式设置输出长度上限，交由接口/模型侧自行决定，
+        // 避免思考模式下因硬性截断只返回 reasoning 而没有正文
+        info!("AI 请求已开启思考模式 (thinking=enabled, reasoning_effort={effort}, 不限制 max_tokens)");
     }
 
     let client = reqwest::Client::builder()
@@ -355,7 +352,11 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
         request = request.bearer_auth(api_key);
     }
 
-    info!("请求 AI 接口: {endpoint}, 模型: {}", ai.model.trim());
+    info!(
+        "请求 AI 接口: {endpoint}, 模型: {}, 请求数据: {}",
+        ai.model.trim(),
+        summarize_request_body(&body)
+    );
     let response = match request.send().await {
         Ok(resp) => resp,
         Err(e) => {
@@ -371,19 +372,18 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
     };
 
     if !status.is_success() {
+        error!("AI 接口返回错误 (HTTP {status}), 完整响应: {text}");
         let brief: String = text.chars().take(500).collect();
         return Err(AppError::Custom(format!(
             "AI 接口返回错误 (HTTP {status}): {brief}"
         )));
     }
 
-    // 记录响应片段，便于排查（截断避免日志过大）
-    info!(
-        "AI 响应 (HTTP {status}): {}",
-        text.chars().take(1000).collect::<String>()
-    );
+    // 记录完整响应，便于命令行排查（不截断）
+    info!("AI 响应 (HTTP {status}): {text}");
 
     let parsed: Value = serde_json::from_str(&text).map_err(|e| {
+        error!("解析 AI 响应失败: {e}; 原始响应: {text}");
         AppError::Custom(format!(
             "解析 AI 响应失败: {e}; 原始响应: {}",
             text.chars().take(500).collect::<String>()
@@ -392,11 +392,12 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
 
     let (content_text, reasoning_text) = extract_message_content(&parsed);
     if content_text.trim().is_empty() {
+        error!("AI 返回的 content 为空, 完整响应: {text}");
         let brief: String = text.chars().take(800).collect();
         if reasoning_text.is_some() {
             return Err(AppError::Custom(format!(
-                "AI 只返回了思考内容（reasoning）而没有正文，通常是思考模式耗尽了输出长度。\
-                 请调大 max_tokens 或在接口侧关闭思考模式。响应片段: {brief}"
+                "AI 只返回了思考内容（reasoning）而没有正文，通常是接口侧的输出长度上限被耗尽。\
+                 可在接口侧关闭思考模式或放宽输出限制后重试。响应片段: {brief}"
             )));
         }
         return Err(AppError::Custom(format!(
@@ -413,6 +414,42 @@ async fn request_ai_title(ai: &AiConfig, image_data_url: String) -> Result<Strin
         ))
     })?;
     Ok(title)
+}
+
+/// 生成用于日志输出的完整请求数据：将超长的 base64 图片 data_url 压缩为摘要，
+/// 其余字段（model / messages / prompt / thinking 等）原样完整展示，便于命令行排查。
+fn summarize_request_body(body: &Value) -> String {
+    let mut body = body.clone();
+    let mask_image = |node: &mut Value| {
+        if let Some(url) = node
+            .pointer_mut("/image_url/url")
+            .and_then(|v| v.as_str())
+        {
+            if url.len() > 300 {
+                let (prefix, _) = url.split_at(url.len().min(60));
+                let total = url.len();
+                *node.pointer_mut("/image_url/url").unwrap() =
+                    json!(format!("{prefix}… [base64 图片, 共 {total} 字符, 日志中省略]"));
+            }
+        }
+    };
+
+    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages.iter_mut() {
+            if let Some(parts) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                for part in parts.iter_mut() {
+                    mask_image(part);
+                }
+            }
+            if let Some(part) = msg.get_mut("content").and_then(|c| c.as_object_mut()) {
+                if let Some(img) = part.get_mut("image_url") {
+                    mask_image(img);
+                }
+            }
+        }
+    }
+
+    serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
 }
 
 /// 从响应中提取模型正文，兼容多种返回结构。

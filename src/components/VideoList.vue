@@ -1388,9 +1388,9 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 3px;
-    padding: 1px 3px;
-    border-radius: 2px;
+    gap: 4px;
+    padding: 3px 4px;
+    border-radius: 4px;
     transition: all 0.3s;
     white-space: nowrap;
     overflow: hidden;
@@ -1414,18 +1414,33 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     opacity: 1;
 }
 
+/* 编辑标题铅笔图标：常显便于识别，放大并带点击热区 */
 .edit-icon {
-    opacity: 0;
-    font-size: 10px;
+    opacity: 0.65;
+    font-size: 13px;
     flex-shrink: 0;
-    transition: opacity 0.3s;
+    padding: 3px;
+    margin: -3px;
+    box-sizing: content-box;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.2s ease;
 }
 
-/* AI 标题生成 sparkle 图标 */
+.video-title .edit-icon:hover {
+    opacity: 1;
+    color: #409eff;
+    background: rgba(64, 158, 255, 0.12);
+}
+
+/* AI 标题生成 sparkle 图标：放大并用 padding 扩展点击热区 */
 .ai-icon {
     flex-shrink: 0;
-    width: 12px;
-    height: 12px;
+    width: 15px;
+    height: 15px;
+    padding: 3px;
+    margin: -3px;
+    box-sizing: content-box;
     color: #909399;
     opacity: 0.9;
     cursor: pointer;
@@ -1435,7 +1450,7 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
 .ai-icon:hover {
     color: #722ed1;
     opacity: 1;
-    transform: scale(1.2);
+    transform: scale(1.15);
     filter: drop-shadow(0 0 4px rgba(114, 46, 209, 0.55));
 }
 
