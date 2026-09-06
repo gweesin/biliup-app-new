@@ -102,6 +102,8 @@ export interface AiConfig {
     ffmpeg_path: string
     /** 是否开启思考模式（DeepSeek 等支持 thinking 参数的接口） */
     thinking: boolean
+    /** 思考强度（仅思考模式生效）：low / high / max */
+    reasoning_effort: 'low' | 'high' | 'max'
 }
 
 // 默认 AI 配置
@@ -111,7 +113,8 @@ export const createDefaultAiConfig = (): AiConfig => ({
     api_key: '',
     model: '',
     ffmpeg_path: '',
-    thinking: true
+    thinking: true,
+    reasoning_effort: 'low'
 })
 
 // 配置根接口

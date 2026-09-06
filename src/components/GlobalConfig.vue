@@ -150,6 +150,23 @@
                 </div>
             </el-form-item>
 
+            <!-- 思考强度 -->
+            <el-form-item label="思考强度">
+                <el-select
+                    v-model="configForm.ai_reasoning_effort"
+                    style="width: 180px"
+                    :disabled="!configForm.ai_enabled || !configForm.ai_thinking"
+                >
+                    <el-option label="低（推荐）" value="low" />
+                    <el-option label="高" value="high" />
+                    <el-option label="最大" value="max" />
+                </el-select>
+                <div class="form-tip">
+                    仅思考模式开启时生效。识别截图这类提取任务推理点有限，选「低」可减少与任务无关的思考，
+                    避免正文被思维链挤短；「高 / 最大」思考更充分但更慢更费
+                </div>
+            </el-form-item>
+
             <!-- ffmpeg 路径 -->
             <el-form-item label="ffmpeg 路径">
                 <div class="ffmpeg-path-container">
@@ -350,6 +367,7 @@ interface GlobalConfigForm {
     ai_model: string
     ai_ffmpeg_path: string
     ai_thinking: boolean
+    ai_reasoning_effort: 'low' | 'high' | 'max'
 }
 
 // Props
@@ -410,7 +428,8 @@ const defaultGlobalConfigForm = (): GlobalConfigForm => ({
     ai_api_key: '',
     ai_model: '',
     ai_ffmpeg_path: '',
-    ai_thinking: true
+    ai_thinking: true,
+    ai_reasoning_effort: 'low'
 })
 
 const configForm = ref<GlobalConfigForm>(defaultGlobalConfigForm())
@@ -482,7 +501,8 @@ const loadGlobalConfig = async () => {
                 ai_api_key: ai.api_key || '',
                 ai_model: ai.model || '',
                 ai_ffmpeg_path: ai.ffmpeg_path || '',
-                ai_thinking: ai.thinking ?? true
+                ai_thinking: ai.thinking ?? true,
+                ai_reasoning_effort: ai.reasoning_effort || 'low'
             }
 
             // 保存原始配置
@@ -522,7 +542,8 @@ const handleSave = async () => {
                 api_key: configForm.value.ai_api_key.trim(),
                 model: configForm.value.ai_model.trim(),
                 ffmpeg_path: configForm.value.ai_ffmpeg_path.trim(),
-                thinking: configForm.value.ai_thinking
+                thinking: configForm.value.ai_thinking,
+                reasoning_effort: configForm.value.ai_reasoning_effort
             }
         })
 
@@ -695,7 +716,8 @@ const hasUnsavedChanges = (): boolean => {
         configForm.value.ai_api_key !== originalConfig.value.ai_api_key ||
         configForm.value.ai_model !== originalConfig.value.ai_model ||
         configForm.value.ai_ffmpeg_path !== originalConfig.value.ai_ffmpeg_path ||
-        configForm.value.ai_thinking !== originalConfig.value.ai_thinking
+        configForm.value.ai_thinking !== originalConfig.value.ai_thinking ||
+        configForm.value.ai_reasoning_effort !== originalConfig.value.ai_reasoning_effort
     )
 }
 

@@ -228,6 +228,12 @@ pub struct AiConfig {
     /// 开启后模型会先输出思维链再给出正文，需要预留足够的输出预算
     #[serde(default = "default_true")]
     pub thinking: bool,
+    /// 思考强度（仅思考模式生效）：low / high / max（DeepSeek 官方取值，非法值按 low）。
+    /// 默认 low：本功能是从截图中提取信息并创作标题，推理点有限，
+    /// 高强度思考会大量消耗输出预算、产出大量与任务无关的推理，
+    /// 导致正文长度不足甚至为空
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
 }
 
 impl Default for AiConfig {
@@ -239,6 +245,7 @@ impl Default for AiConfig {
             model: String::new(),
             ffmpeg_path: String::new(),
             thinking: true,
+            reasoning_effort: default_reasoning_effort(),
         }
     }
 }
@@ -249,6 +256,10 @@ fn default_ai_base_url() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_reasoning_effort() -> String {
+    "low".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
