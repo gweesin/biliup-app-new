@@ -7,14 +7,34 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex, MutexGuard};
 use tracing::{info, warn};
 
 use crate::error::AppError;
 
+/// 提交给视觉模型的画面长边上限：模型内部同样会把图片缩到较小尺寸，
+/// 直接传原图分辨率只是白白多消耗 token，因此统一缩放（只缩小、不放大）。
+const MAX_FRAME_EDGE: u32 = 1280;
+/// 单帧 JPEG 体积上限，超过则用 ffmpeg 再压一轮（进一步降分辨率与质量）
+const MAX_FRAME_BYTES: usize = 600 * 1024;
+/// 截帧 JPEG 质量（mjpeg 的 q:v，取值 2-31，越小质量越高体积越大）
+const FRAME_QUALITY: &str = "6";
+
 /// ffmpeg 串行执行队列：tokio 的 Mutex 是 FIFO 公平锁，先到的调用方先执行。
 static FFMPEG_QUEUE: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// 生成「限制长边、只缩小不放大」的 scale 表达式。
+/// 注意：不能用 `force_original_aspect_ratio=decrease`，实测它会把小图放大到贴合边框
+/// （522x330 会被放大成 1280x808）；这里用 min() 保证只对超标的边等比缩小，
+/// `-2` 让另一边按比例取整到偶数，便于 420 采样。
+fn scale_filter(edge: u32) -> String {
+    format!(
+        "scale=w='if(gt(iw\\,ih)\\,min(iw\\,{edge})\\,-2)':\
+         h='if(gt(iw\\,ih)\\,-2\\,min(ih\\,{edge}))'"
+    )
+}
 
 /// 进入 ffmpeg 串行队列；返回的 guard 释放后，下一个排队者才会开始执行
 pub async fn ffmpeg_queue_lock() -> MutexGuard<'static, ()> {
@@ -108,6 +128,7 @@ pub async fn capture_frame_near_end(
     // 1. 优先：从末尾倒数定位，省掉一次 ffprobe / ffmpeg 的全文件解析
     match extract_frame_from_end(ffmpeg, video_path, from_end_secs).await {
         Ok(bytes) if !bytes.is_empty() => {
+            let bytes = optimize_frame(ffmpeg, bytes).await;
             info!(
                 "截帧完成（末尾倒数定位）: {} 字节, 总耗时 {:.3}s, 路径: {video_path}",
                 bytes.len(),
@@ -129,13 +150,78 @@ pub async fn capture_frame_near_end(
 
     let target = (duration - from_end_secs).max(0.0);
     let extract_start = Instant::now();
-    let bytes = extract_frame(ffmpeg, video_path, target).await?;
+    let raw = extract_frame(ffmpeg, video_path, target).await?;
+    let bytes = optimize_frame(ffmpeg, raw).await;
     info!(
         "截帧完成（精确定位）: {} 字节, 时间点 {target:.3}s, 耗时 {:.3}s",
         bytes.len(),
         extract_start.elapsed().as_secs_f64()
     );
     Ok((format!("{target:.3}s"), bytes))
+}
+
+/// 控制提交给视觉模型的画面体积：超过 MAX_FRAME_BYTES 时用 ffmpeg 再压一轮
+/// （进一步降低长边与质量）。JPEG 是重编码，第二轮会再损失少量细节，
+/// 但结算截图这类内容在 1024 长边下仍清晰可识别，换取的是 token 大幅下降。
+async fn optimize_frame(ffmpeg: &Path, frame: Vec<u8>) -> Vec<u8> {
+    if frame.len() <= MAX_FRAME_BYTES {
+        return frame;
+    }
+
+    let before = frame.len();
+    match shrink_frame(ffmpeg, &frame, 1024, 8).await {
+        Ok(bytes) if !bytes.is_empty() && bytes.len() < before => {
+            info!("截帧二次压缩: {before} 字节 -> {} 字节", bytes.len());
+            bytes
+        }
+        Ok(_) => frame,
+        Err(e) => {
+            warn!("截帧二次压缩失败，使用原图: {e}");
+            frame
+        }
+    }
+}
+
+/// 用 ffmpeg 对已有 JPEG 再编码：stdin 输入、stdout 输出，缩小长边并降低质量
+async fn shrink_frame(
+    ffmpeg: &Path,
+    frame: &[u8],
+    edge: u32,
+    quality: u32,
+) -> Result<Vec<u8>, AppError> {
+    let scale_arg = scale_filter(edge);
+    let quality_arg = quality.to_string();
+    let (stdout, stderr) = run_process_with_stdin(
+        ffmpeg,
+        &[
+            "-y",
+            "-i",
+            "pipe:0",
+            "-vf",
+            &scale_arg,
+            "-frames:v",
+            "1",
+            "-an",
+            "-f",
+            "image2pipe",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            &quality_arg,
+            "pipe:1",
+        ],
+        frame,
+        60,
+    )
+    .await?;
+
+    if stdout.is_empty() {
+        return Err(AppError::Custom(format!(
+            "图片二次压缩无输出: {}",
+            stderr.lines().next_back().unwrap_or("未知错误")
+        )));
+    }
+    Ok(stdout)
 }
 
 /// 探测视频时长（秒）。优先使用同目录 ffprobe，失败时解析 ffmpeg -i 输出
@@ -184,6 +270,7 @@ pub async fn extract_frame(
     at_second: f64,
 ) -> Result<Vec<u8>, AppError> {
     let seek_arg = format!("{at_second:.3}");
+    let scale_arg = scale_filter(MAX_FRAME_EDGE);
     let (stdout, stderr) = run_process(
         ffmpeg,
         &[
@@ -198,12 +285,15 @@ pub async fn extract_frame(
             "-an",
             "-sn",
             "-dn",
+            // 缩到模型够用的尺寸，避免大图白白消耗 token
+            "-vf",
+            &scale_arg,
             "-f",
             "image2pipe",
             "-c:v",
             "mjpeg",
             "-q:v",
-            "5",
+            FRAME_QUALITY,
             "pipe:1",
         ],
         60,
@@ -227,6 +317,7 @@ async fn extract_frame_from_end(
     from_end_secs: f64,
 ) -> Result<Vec<u8>, AppError> {
     let seek_arg = format!("-{from_end_secs:.3}");
+    let scale_arg = scale_filter(MAX_FRAME_EDGE);
     let (stdout, stderr) = run_process(
         ffmpeg,
         &[
@@ -240,12 +331,15 @@ async fn extract_frame_from_end(
             "-an",
             "-sn",
             "-dn",
+            // 缩到模型够用的尺寸，避免大图白白消耗 token
+            "-vf",
+            &scale_arg,
             "-f",
             "image2pipe",
             "-c:v",
             "mjpeg",
             "-q:v",
-            "5",
+            FRAME_QUALITY,
             "pipe:1",
         ],
         60,
@@ -289,6 +383,55 @@ async fn run_process(
         started.elapsed().as_secs_f64(),
         program.display(),
         args.join(" ")
+    );
+
+    Ok((
+        output.stdout,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+/// 执行外部进程并把 `input` 写入 stdin，返回 stdout / stderr（用于图片二次压缩）
+async fn run_process_with_stdin(
+    program: &Path,
+    args: &[&str],
+    input: &[u8],
+    timeout_secs: u64,
+) -> Result<(Vec<u8>, String), AppError> {
+    let started = Instant::now();
+
+    let mut cmd = TokioCommand::new(program);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Custom(format!("无法启动 {}: {e}", program.display())))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input)
+            .await
+            .map_err(|e| AppError::Custom(format!("写入 {} 输入失败: {e}", program.display())))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|e| AppError::Custom(format!("关闭 {} 输入失败: {e}", program.display())))?;
+    }
+
+    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
+        .await
+        .map_err(|_| AppError::Custom(format!("{} 执行超时", program.display())))?
+        .map_err(|e| AppError::Custom(format!("执行 {} 失败: {e}", program.display())))?;
+
+    info!(
+        "外部进程耗时 {:.3}s: {} {} (stdin {} 字节)",
+        started.elapsed().as_secs_f64(),
+        program.display(),
+        args.join(" "),
+        input.len()
     );
 
     Ok((
