@@ -4,7 +4,15 @@ import { Channel, invoke } from '@tauri-apps/api/core'
 import { ElMessage } from 'element-plus'
 import type { MentionUserGroup } from '../types/mention'
 
-/** Rust 端 generate_ai_title 返回的结构化结果 */
+/** Rust 端 ai_analyze_video 返回的结构化结果（步骤一：图像识别） */
+export interface AiAnalyzeResult {
+    /** 从结算画面中提取出的对局信息文本 */
+    info: string
+    /** 图像识别模型的思考过程（可能为空，仅用于排查） */
+    reasoning: string
+}
+
+/** Rust 端 generate_ai_title 返回的结构化结果（步骤二：标题创作） */
 export interface AiTitleResult {
     title: string
     reasoning: string
@@ -17,25 +25,41 @@ export interface AiReasoningEvent {
 }
 
 /**
- * AI 标题生成的提示词，存放在前端以便直接修改（改动无需重新编译 Rust）。
- * 需要调整标题风格/信息提取要求时，修改下面这段文本即可。
+ * 步骤一（图像识别模型）的提示词，存放在前端以便直接修改（改动无需重新编译 Rust）。
+ * 发给「图像识别」端点（要求支持图片输入），只负责从结算画面中提取对局信息文本。
  */
-export const AI_TITLE_PROMPT = `请处理这张 MOBA 游戏梦三国2的对局结算截图，完成信息提取，并自由创作一个战报标题。
+export const AI_VISION_PROMPT = `请识别这张 MOBA 游戏梦三国2 的对局结算截图，提取对局信息。
 
-第一步 提取信息
+需要提取的内容：
 - 对局胜负结果与双方阵营的最终比分
 - 绿底高亮行对应的英雄名称（只取英雄名；英雄名多为三国人物名，不要带玩家名）
 - 该英雄的 KDA（击杀 / 死亡 / 助攻）
+- 其他你认为对后续创作标题有价值且确信无误的对局事实
 
-第二步 自由创作标题
-围绕英雄名创作 1 个最有冲击力、最适合游戏高光展示的标题：
-- 标题中必须出现英雄名
+输出要求：
+- 只输出提取出的对局信息，整理为「每行一条」的简洁文本清单
+- 信息不确定时不要编造，直接省略或标注「不确定」
+- 你的输出将作为上下文原样交给另一个 AI 创作标题，因此请直接给出信息正文
+- 不要输出 JSON 包裹、不要创作标题、不要任何寒暄或解释性前后缀文字`
+
+/**
+ * 步骤二（标题生成模型）的提示词，存放在前端以便直接修改（改动无需重新编译 Rust）。
+ * 发给「标题生成」端点（纯文本能力即可），根据给定的对局信息创作标题。
+ */
+export const AI_WRITE_PROMPT = `你是一名资深游戏剪辑标题编辑。系统消息中给出了从对局结算截图提取出的信息，请据此自由创作一个战报标题。
+
+创作要求：
+- 标题中必须出现信息中的英雄名
+- 仅依据给出的信息进行创作，不要假设或编造信息里没有的内容
 - 切入角度、表达风格、句式结构、英雄名所在位置，全部由你自己决定，不要套用任何固定模板，也不要沿用你的第一反应句式
 - 先在脑中快速构思 3 个方向完全不同的标题（不同角度、不同语气、不同长度、不同修辞），再从中挑出最好的那一个
 - 允许口语、玩梗、夸张、古风、悬念、反差、第一人称等任意风格，只要不低俗、不误导
 - 可以结合对局结果、最终比分、KDA 等信息，但并不是必须每次生成都体现，需要结合实际情况
 
 只输出最终那 1 个标题文本，不要编号、不要引号、不要列表、不要任何解释或前后缀文字。`
+
+/** 兼容旧引用：原单模型时代的提示词即现在的「标题创作」提示词 */
+export const AI_TITLE_PROMPT = AI_WRITE_PROMPT
 
 /** 稿件列表项（与后端 get_archives 命令返回结构对应） */
 export interface ArchiveListItem {
@@ -217,16 +241,40 @@ export const useUtilsStore = defineStore('template', () => {
     }
 
     /**
-     * 请求 AI 生成标题：截取视频倒数第三秒画面提交视觉模型。
-     * 开启思考模式时，Rust 端会走 SSE 流式请求，通过 on_reasoning 通道把「深度思考」过程
-     * 增量实时回调（每次回调为一段新文本，直接追加展示即可）。
+     * 步骤一：截取视频倒数第三秒画面并调用「图像识别」模型提取对局信息。
      * @param videoPath 本地视频文件路径
-     * @param prompt 提示词，默认使用 AI_TITLE_PROMPT
+     * @param prompt 识别提示词，默认使用 AI_VISION_PROMPT
+     */
+    const analyzeVideo = async (
+        videoPath: string,
+        prompt: string = AI_VISION_PROMPT
+    ): Promise<AiAnalyzeResult> => {
+        try {
+            const result = await invoke<AiAnalyzeResult>('ai_analyze_video', {
+                videoPath,
+                prompt
+            })
+            return {
+                info: String(result?.info || ''),
+                reasoning: String(result?.reasoning || '')
+            }
+        } catch (error) {
+            console.error('AI 图像识别失败:', error)
+            throw error
+        }
+    }
+
+    /**
+     * 步骤二：把识别出的对局信息文本交给「标题生成」模型创作标题（纯文本请求）。
+     * 标题生成模型开启思考模式时，Rust 端会走 SSE 流式请求，通过 on_reasoning 通道把
+     * 「深度思考」过程增量实时回调（每次回调为一段新文本，直接追加展示即可）。
+     * @param info 步骤一识别出的对局信息文本（作为上下文）
+     * @param prompt 创作提示词，默认使用 AI_WRITE_PROMPT
      * @param onReasoning 思考内容增量回调（可选）
      */
     const generateAiTitle = async (
-        videoPath: string,
-        prompt: string = AI_TITLE_PROMPT,
+        info: string,
+        prompt: string = AI_WRITE_PROMPT,
         onReasoning?: (delta: string) => void
     ): Promise<AiTitleResult> => {
         const channel = new Channel<AiReasoningEvent>()
@@ -243,7 +291,7 @@ export const useUtilsStore = defineStore('template', () => {
         }
         try {
             const result = await invoke<AiTitleResult>('generate_ai_title', {
-                videoPath,
+                info,
                 prompt,
                 onReasoning: channel
             })
@@ -443,6 +491,7 @@ export const useUtilsStore = defineStore('template', () => {
         getAvatarCacheDir,
         readDirRecursive,
         uploadCover,
+        analyzeVideo,
         generateAiTitle,
         downloadCover,
         initArchievePre,

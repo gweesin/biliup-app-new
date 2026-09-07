@@ -89,7 +89,7 @@
                 <el-text type="primary" size="large">AI 设置</el-text>
             </el-divider>
 
-            <!-- 开启 AI 标题生成 -->
+            <!-- 开启 AI 标题生成（总开关） -->
             <el-form-item label="开启 AI 标题生成">
                 <el-switch
                     v-model="configForm.ai_enabled"
@@ -97,77 +97,143 @@
                     inactive-text="关闭"
                 />
                 <div class="form-tip">
-                    在视频列表中点击标题旁的 ✨ 图标，自动截取视频最后 3 秒画面并生成标题
+                    在视频列表中点击标题旁的 ✨ 图标，自动完成两步：① 图像识别模型截取结算画面提取对局信息；
+                    ② 标题生成模型基于识别出的信息创作标题并回填。识别出的对局信息会展示在条目上供核对
                 </div>
             </el-form-item>
 
-            <!-- AI 接口地址 -->
-            <el-form-item label="接口地址 Base URL">
-                <el-input
-                    v-model="configForm.ai_base_url"
-                    placeholder="https://api.openai.com/v1"
-                    clearable
-                    :disabled="!configForm.ai_enabled"
-                />
-                <div class="form-tip">支持任意 OpenAI 兼容的视觉模型接口（OpenAI / DeepSeek / 通义千问 / Ollama 等）</div>
-            </el-form-item>
-
-            <!-- API Key -->
-            <el-form-item label="API Key">
-                <el-input
-                    v-model="configForm.ai_api_key"
-                    type="password"
-                    show-password
-                    placeholder="sk-..."
-                    clearable
-                    :disabled="!configForm.ai_enabled"
-                />
-                <div class="form-tip">密钥仅保存在本地配置文件中</div>
-            </el-form-item>
-
-            <!-- 模型名称 -->
-            <el-form-item label="模型名称">
-                <el-input
-                    v-model="configForm.ai_model"
-                    placeholder="例如 gpt-4o-mini / deepseek-v4-flash-vision-exp / qwen-vl-plus"
-                    clearable
-                    :disabled="!configForm.ai_enabled"
-                />
-                <div class="form-tip">需要支持图片输入（视觉）的模型</div>
-            </el-form-item>
-
-            <!-- 思考模式 -->
-            <el-form-item label="思考模式">
-                <el-switch
-                    v-model="configForm.ai_thinking"
-                    active-text="开启"
-                    inactive-text="关闭"
-                    :disabled="!configForm.ai_enabled"
-                />
-                <div class="form-tip">
-                    适用于 DeepSeek 等支持 thinking 参数的接口，开启后模型会先思考再产出标题；
-                    其他服务（如 OpenAI）请关闭，否则可能因未知参数报错
+            <!-- 第一步：图像识别模型（视觉） -->
+            <div class="ai-step-group">
+                <div class="ai-step-header">
+                    <span class="ai-step-index">1</span>
+                    <span class="ai-step-title">图像识别模型</span>
+                    <span class="ai-step-sub">截帧识别结算画面，提取对局信息（需支持图片输入）</span>
                 </div>
-            </el-form-item>
+                <el-form-item label="接口地址 Base URL">
+                    <el-input
+                        v-model="configForm.ai_vision_base_url"
+                        placeholder="https://api.openai.com/v1"
+                        clearable
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <div class="form-tip">
+                        支持任意 OpenAI 兼容的视觉模型接口（OpenAI / DeepSeek / 通义千问 / Ollama 等）
+                    </div>
+                </el-form-item>
+                <el-form-item label="API Key">
+                    <el-input
+                        v-model="configForm.ai_vision_api_key"
+                        type="password"
+                        show-password
+                        placeholder="sk-..."
+                        clearable
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <div class="form-tip">密钥仅保存在本地配置文件中</div>
+                </el-form-item>
+                <el-form-item label="模型名称">
+                    <el-input
+                        v-model="configForm.ai_vision_model"
+                        placeholder="例如 gpt-4o-mini / deepseek-v4-flash-vision-exp / qwen-vl-plus"
+                        clearable
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <div class="form-tip">需要支持图片输入（视觉）的模型；提示词要求直接输出信息，通常无需思考</div>
+                </el-form-item>
+                <el-form-item label="思考模式">
+                    <el-switch
+                        v-model="configForm.ai_vision_thinking"
+                        active-text="开启"
+                        inactive-text="关闭"
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <div class="form-tip">
+                        适用于 DeepSeek 等支持 thinking 参数的接口；其他服务（如 OpenAI）请关闭，
+                        否则可能因未知参数报错。识别阶段不开思考可显著提速
+                    </div>
+                </el-form-item>
+                <el-form-item label="思考强度">
+                    <el-select
+                        v-model="configForm.ai_vision_reasoning_effort"
+                        style="width: 180px"
+                        :disabled="!configForm.ai_enabled || !configForm.ai_vision_thinking"
+                    >
+                        <el-option label="低（推荐）" value="low" />
+                        <el-option label="高" value="high" />
+                        <el-option label="最大" value="max" />
+                    </el-select>
+                    <div class="form-tip">
+                        仅思考模式开启时生效。信息提取任务推理点有限，选「低」可减少与任务无关的思考，
+                        避免正文被思维链挤短
+                    </div>
+                </el-form-item>
+            </div>
 
-            <!-- 思考强度 -->
-            <el-form-item label="思考强度">
-                <el-select
-                    v-model="configForm.ai_reasoning_effort"
-                    style="width: 180px"
-                    :disabled="!configForm.ai_enabled || !configForm.ai_thinking"
-                >
-                    <el-option label="低（推荐）" value="low" />
-                    <el-option label="高" value="high" />
-                    <el-option label="最大" value="max" />
-                </el-select>
-                <div class="form-tip">
-                    仅思考模式开启时生效。识别截图这类提取任务推理点有限，选「低」可减少与任务无关的思考，
-                    避免正文被思维链挤短；「高 / 最大」思考更充分但更慢更费
+            <!-- 第二步：标题生成模型（文本） -->
+            <div class="ai-step-group">
+                <div class="ai-step-header">
+                    <span class="ai-step-index">2</span>
+                    <span class="ai-step-title">标题生成模型</span>
+                    <span class="ai-step-sub">基于识别出的对局信息创作标题（纯文本能力即可）</span>
                 </div>
-            </el-form-item>
+                <el-form-item label="接口地址 Base URL">
+                    <el-input
+                        v-model="configForm.ai_writer_base_url"
+                        placeholder="https://api.openai.com/v1"
+                        clearable
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <div class="form-tip">OpenAI 兼容的 chat/completions 接口，支持与图像识别使用不同服务商</div>
+                </el-form-item>
+                <el-form-item label="API Key">
+                    <el-input
+                        v-model="configForm.ai_writer_api_key"
+                        type="password"
+                        show-password
+                        placeholder="sk-..."
+                        clearable
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <div class="form-tip">密钥仅保存在本地配置文件中</div>
+                </el-form-item>
+                <el-form-item label="模型名称">
+                    <el-input
+                        v-model="configForm.ai_writer_model"
+                        placeholder="例如 gpt-4o / deepseek-v4"
+                        clearable
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <div class="form-tip">普通文本模型即可，通常可选用比图像识别更强/更便宜的文本模型</div>
+                </el-form-item>
+                <el-form-item label="思考模式">
+                    <el-switch
+                        v-model="configForm.ai_writer_thinking"
+                        active-text="开启"
+                        inactive-text="关闭"
+                        :disabled="!configForm.ai_enabled"
+                    />
+                    <div class="form-tip">
+                        适用于 DeepSeek 等支持 thinking 参数的接口，开启后创作前会展示「深度思考」过程；
+                        其他服务（如 OpenAI）请关闭，否则可能因未知参数报错
+                    </div>
+                </el-form-item>
+                <el-form-item label="思考强度">
+                    <el-select
+                        v-model="configForm.ai_writer_reasoning_effort"
+                        style="width: 180px"
+                        :disabled="!configForm.ai_enabled || !configForm.ai_writer_thinking"
+                    >
+                        <el-option label="低（推荐）" value="low" />
+                        <el-option label="高" value="high" />
+                        <el-option label="最大" value="max" />
+                    </el-select>
+                    <div class="form-tip">
+                        仅思考模式开启时生效。建议选「低」，避免思考挤占正文输出预算、导致标题为空
+                    </div>
+                </el-form-item>
+            </div>
 
-            <!-- ffmpeg 路径 -->
+            <!-- ffmpeg 路径（两步共用，用于截帧） -->
             <el-form-item label="ffmpeg 路径">
                 <div class="ffmpeg-path-container">
                     <el-input
@@ -185,7 +251,7 @@
                     </el-button>
                 </div>
                 <div class="form-tip">
-                    用于截取视频画面，未检测到 ffmpeg 时 AI 生成标题不可用
+                    仅用于图像识别前的视频截帧，两步共用；未检测到 ffmpeg 时 AI 标题生成不可用
                 </div>
             </el-form-item>
 
@@ -362,12 +428,17 @@ interface GlobalConfigForm {
     log_level: string
     cover_match_path: string
     ai_enabled: boolean
-    ai_base_url: string
-    ai_api_key: string
-    ai_model: string
     ai_ffmpeg_path: string
-    ai_thinking: boolean
-    ai_reasoning_effort: 'low' | 'high' | 'max'
+    ai_vision_base_url: string
+    ai_vision_api_key: string
+    ai_vision_model: string
+    ai_vision_thinking: boolean
+    ai_vision_reasoning_effort: 'low' | 'high' | 'max'
+    ai_writer_base_url: string
+    ai_writer_api_key: string
+    ai_writer_model: string
+    ai_writer_thinking: boolean
+    ai_writer_reasoning_effort: 'low' | 'high' | 'max'
 }
 
 // Props
@@ -424,12 +495,17 @@ const defaultGlobalConfigForm = (): GlobalConfigForm => ({
     log_level: 'info',
     cover_match_path: '',
     ai_enabled: false,
-    ai_base_url: 'https://api.openai.com/v1',
-    ai_api_key: '',
-    ai_model: '',
     ai_ffmpeg_path: '',
-    ai_thinking: true,
-    ai_reasoning_effort: 'low'
+    ai_vision_base_url: 'https://api.openai.com/v1',
+    ai_vision_api_key: '',
+    ai_vision_model: '',
+    ai_vision_thinking: true,
+    ai_vision_reasoning_effort: 'low',
+    ai_writer_base_url: 'https://api.openai.com/v1',
+    ai_writer_api_key: '',
+    ai_writer_model: '',
+    ai_writer_thinking: true,
+    ai_writer_reasoning_effort: 'low'
 })
 
 const configForm = ref<GlobalConfigForm>(defaultGlobalConfigForm())
@@ -497,12 +573,17 @@ const loadGlobalConfig = async () => {
                 log_level: config.log_level || 'info',
                 cover_match_path: config.cover_match_path || '',
                 ai_enabled: ai.enabled ?? false,
-                ai_base_url: ai.base_url || 'https://api.openai.com/v1',
-                ai_api_key: ai.api_key || '',
-                ai_model: ai.model || '',
                 ai_ffmpeg_path: ai.ffmpeg_path || '',
-                ai_thinking: ai.thinking ?? true,
-                ai_reasoning_effort: ai.reasoning_effort || 'low'
+                ai_vision_base_url: ai.vision?.base_url || 'https://api.openai.com/v1',
+                ai_vision_api_key: ai.vision?.api_key || '',
+                ai_vision_model: ai.vision?.model || '',
+                ai_vision_thinking: ai.vision?.thinking ?? true,
+                ai_vision_reasoning_effort: ai.vision?.reasoning_effort || 'low',
+                ai_writer_base_url: ai.writer?.base_url || 'https://api.openai.com/v1',
+                ai_writer_api_key: ai.writer?.api_key || '',
+                ai_writer_model: ai.writer?.model || '',
+                ai_writer_thinking: ai.writer?.thinking ?? true,
+                ai_writer_reasoning_effort: ai.writer?.reasoning_effort || 'low'
             }
 
             // 保存原始配置
@@ -538,12 +619,21 @@ const handleSave = async () => {
             cover_match_path: configForm.value.cover_match_path.trim(),
             ai: {
                 enabled: configForm.value.ai_enabled,
-                base_url: configForm.value.ai_base_url.trim(),
-                api_key: configForm.value.ai_api_key.trim(),
-                model: configForm.value.ai_model.trim(),
                 ffmpeg_path: configForm.value.ai_ffmpeg_path.trim(),
-                thinking: configForm.value.ai_thinking,
-                reasoning_effort: configForm.value.ai_reasoning_effort
+                vision: {
+                    base_url: configForm.value.ai_vision_base_url.trim(),
+                    api_key: configForm.value.ai_vision_api_key.trim(),
+                    model: configForm.value.ai_vision_model.trim(),
+                    thinking: configForm.value.ai_vision_thinking,
+                    reasoning_effort: configForm.value.ai_vision_reasoning_effort
+                },
+                writer: {
+                    base_url: configForm.value.ai_writer_base_url.trim(),
+                    api_key: configForm.value.ai_writer_api_key.trim(),
+                    model: configForm.value.ai_writer_model.trim(),
+                    thinking: configForm.value.ai_writer_thinking,
+                    reasoning_effort: configForm.value.ai_writer_reasoning_effort
+                }
             }
         })
 
@@ -712,12 +802,19 @@ const hasUnsavedChanges = (): boolean => {
         configForm.value.log_level !== originalConfig.value.log_level ||
         configForm.value.cover_match_path !== originalConfig.value.cover_match_path ||
         configForm.value.ai_enabled !== originalConfig.value.ai_enabled ||
-        configForm.value.ai_base_url !== originalConfig.value.ai_base_url ||
-        configForm.value.ai_api_key !== originalConfig.value.ai_api_key ||
-        configForm.value.ai_model !== originalConfig.value.ai_model ||
         configForm.value.ai_ffmpeg_path !== originalConfig.value.ai_ffmpeg_path ||
-        configForm.value.ai_thinking !== originalConfig.value.ai_thinking ||
-        configForm.value.ai_reasoning_effort !== originalConfig.value.ai_reasoning_effort
+        configForm.value.ai_vision_base_url !== originalConfig.value.ai_vision_base_url ||
+        configForm.value.ai_vision_api_key !== originalConfig.value.ai_vision_api_key ||
+        configForm.value.ai_vision_model !== originalConfig.value.ai_vision_model ||
+        configForm.value.ai_vision_thinking !== originalConfig.value.ai_vision_thinking ||
+        configForm.value.ai_vision_reasoning_effort !==
+            originalConfig.value.ai_vision_reasoning_effort ||
+        configForm.value.ai_writer_base_url !== originalConfig.value.ai_writer_base_url ||
+        configForm.value.ai_writer_api_key !== originalConfig.value.ai_writer_api_key ||
+        configForm.value.ai_writer_model !== originalConfig.value.ai_writer_model ||
+        configForm.value.ai_writer_thinking !== originalConfig.value.ai_writer_thinking ||
+        configForm.value.ai_writer_reasoning_effort !==
+            originalConfig.value.ai_writer_reasoning_effort
     )
 }
 
@@ -780,6 +877,51 @@ const handleSelectFfmpegPath = async () => {
     width: 100%;
     display: flex;
     gap: 8px;
+}
+
+/* AI 设置两步分组卡片 */
+.ai-step-group {
+    border: 1px solid #e4e7ed;
+    border-radius: 6px;
+    padding: 12px 14px 0;
+    margin: 0 0 16px;
+    background: #fafafa;
+}
+
+.ai-step-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.ai-step-index {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #409eff;
+    color: #fff;
+    font-size: 12px;
+    line-height: 20px;
+    text-align: center;
+}
+
+.ai-step-title {
+    font-weight: 600;
+    color: #303133;
+    font-size: 14px;
+}
+
+.ai-step-sub {
+    color: #909399;
+    font-size: 12px;
+}
+
+@media (max-width: 560px) {
+    .ai-step-sub {
+        display: none;
+    }
 }
 
 .rate-limit-container {

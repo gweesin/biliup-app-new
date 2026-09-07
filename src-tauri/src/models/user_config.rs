@@ -206,46 +206,139 @@ pub struct UserConfig {
     pub template_updated_at: HashMap<String, u64>,
 }
 
-/// AI 服务（OpenAI 兼容接口）与视频截帧配置
+/// AI 单个接入端点（OpenAI 兼容接口）配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiConfig {
-    /// 是否启用 AI 标题生成
-    #[serde(default)]
-    pub enabled: bool,
+pub struct AiEndpointConfig {
     /// OpenAI 兼容接口地址，例如 https://api.openai.com/v1
     #[serde(default = "default_ai_base_url")]
     pub base_url: String,
     /// 接口密钥（仅保存在本地配置文件中）
     #[serde(default)]
     pub api_key: String,
-    /// 支持视觉输入的模型名，例如 gpt-4o-mini
+    /// 模型名，例如 gpt-4o-mini / deepseek-v4-flash-vision-exp
     #[serde(default)]
     pub model: String,
-    /// ffmpeg 可执行文件路径，留空时自动在 PATH 与常见目录中查找
-    #[serde(default)]
-    pub ffmpeg_path: String,
     /// 是否开启思考模式（DeepSeek 等支持 thinking 参数的接口）。
     /// 开启后模型会先输出思维链再给出正文，需要预留足够的输出预算
     #[serde(default = "default_true")]
     pub thinking: bool,
-    /// 思考强度（仅思考模式生效）：low / high / max（DeepSeek 官方取值，非法值按 low）。
-    /// 默认 low：本功能是从截图中提取信息并创作标题，推理点有限，
-    /// 高强度思考会大量消耗输出预算、产出大量与任务无关的推理，
-    /// 导致正文长度不足甚至为空
+    /// 思考强度（仅思考模式生效）：low / high / max（DeepSeek 官方取值，非法值按 low）
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
+}
+
+impl Default for AiEndpointConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_ai_base_url(),
+            api_key: String::new(),
+            model: String::new(),
+            thinking: true,
+            reasoning_effort: default_reasoning_effort(),
+        }
+    }
+}
+
+/// AI 标题生成配置（两步拆分，两个模型可指向不同服务商）：
+/// - vision：图像识别模型 —— 截取视频画面后读取结算信息，输出对局信息文本
+/// - writer：标题生成模型 —— 基于识别出的对局信息创作标题（纯文本）
+/// ffmpeg 用于截帧，由两端点共用。
+#[derive(Debug, Clone, Serialize)]
+pub struct AiConfig {
+    /// 是否启用 AI 标题生成（两步同时启用才可用）
+    #[serde(default)]
+    pub enabled: bool,
+    /// ffmpeg 可执行文件路径，留空时自动在 PATH 与常见目录中查找
+    #[serde(default)]
+    pub ffmpeg_path: String,
+    /// 图像识别模型配置（第一步）
+    #[serde(default)]
+    pub vision: AiEndpointConfig,
+    /// 标题生成模型配置（第二步）
+    #[serde(default)]
+    pub writer: AiEndpointConfig,
+}
+
+// 兼容旧版扁平结构（ai.base_url / ai.api_key / ai.model 等顶层字段）：
+// 反序列化时若没有 vision / writer 子对象，将旧字段同时迁移给两端点；
+// 全新配置（无任何旧字段）直接取默认值。保存后再读取即为新结构。
+impl<'de> Deserialize<'de> for AiConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            ffmpeg_path: String,
+            #[serde(default)]
+            vision: Option<AiEndpointConfig>,
+            #[serde(default)]
+            writer: Option<AiEndpointConfig>,
+            // 旧版扁平字段（一次性迁移，随配置保存后不再出现）
+            #[serde(default)]
+            base_url: Option<String>,
+            #[serde(default)]
+            api_key: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            thinking: Option<bool>,
+            #[serde(default)]
+            reasoning_effort: Option<String>,
+        }
+        let Raw {
+            enabled,
+            ffmpeg_path,
+            vision,
+            writer,
+            base_url,
+            api_key,
+            model,
+            thinking,
+            reasoning_effort,
+        } = Raw::deserialize(deserializer)?;
+
+        let has_legacy = base_url.is_some()
+            || api_key.is_some()
+            || model.is_some()
+            || thinking.is_some()
+            || reasoning_effort.is_some();
+        let legacy_effort = reasoning_effort.unwrap_or_else(default_reasoning_effort);
+        let legacy_thinking = thinking.unwrap_or_else(default_true);
+
+        let endpoint_from_legacy = |cur: Option<AiEndpointConfig>| -> AiEndpointConfig {
+            match cur {
+                Some(cfg) => cfg,
+                None if !has_legacy => AiEndpointConfig::default(),
+                None => AiEndpointConfig {
+                    base_url: base_url.clone().unwrap_or_else(default_ai_base_url),
+                    api_key: api_key.clone().unwrap_or_default(),
+                    model: model.clone().unwrap_or_default(),
+                    thinking: legacy_thinking,
+                    reasoning_effort: legacy_effort.clone(),
+                },
+            }
+        };
+
+        Ok(Self {
+            enabled,
+            ffmpeg_path,
+            vision: endpoint_from_legacy(vision),
+            writer: endpoint_from_legacy(writer),
+        })
+    }
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            base_url: default_ai_base_url(),
-            api_key: String::new(),
-            model: String::new(),
             ffmpeg_path: String::new(),
-            thinking: true,
-            reasoning_effort: default_reasoning_effort(),
+            vision: AiEndpointConfig::default(),
+            writer: AiEndpointConfig::default(),
         }
     }
 }
@@ -424,15 +517,15 @@ impl ConfigRoot {
         ai: AiConfig,
     ) -> &Self {
         info!(
-            "更新全局配置: max_curr={}, auto_start={}, auto_upload={}, log_level={}, cover_match_path={}, ai_enabled={}, ai_base_url={}, ai_model={}",
+            "更新全局配置: max_curr={}, auto_start={}, auto_upload={}, log_level={}, cover_match_path={}, ai_enabled={}, vision_model={}, writer_model={}",
             max_curr,
             auto_start,
             auto_upload,
             log_level,
             cover_match_path,
             ai.enabled,
-            ai.base_url,
-            ai.model
+            ai.vision.model,
+            ai.writer.model
         );
         self.max_curr = max_curr;
         self.auto_start = auto_start;

@@ -6,5 +6,6 @@ pub mod user_config;
 pub use upload_task::*;
 pub use user::*;
 pub use user_config::{
-    AiConfig, ConfigRoot, Subtitle, TemplateConfig, UserConfig, UserInfo, VideoInfo,
+    AiConfig, AiEndpointConfig, ConfigRoot, Subtitle, TemplateConfig, UserConfig, UserInfo,
+    VideoInfo,
 };

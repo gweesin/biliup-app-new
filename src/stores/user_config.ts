@@ -93,28 +93,56 @@ interface UserConfig {
     template_updated_at: Record<string, number>
 }
 
-// AI 服务（OpenAI 兼容接口）配置
-export interface AiConfig {
-    enabled: boolean
+// AI 单个接入端点（OpenAI 兼容接口）配置
+export interface AiEndpointConfig {
     base_url: string
     api_key: string
     model: string
-    ffmpeg_path: string
     /** 是否开启思考模式（DeepSeek 等支持 thinking 参数的接口） */
     thinking: boolean
     /** 思考强度（仅思考模式生效）：low / high / max */
     reasoning_effort: 'low' | 'high' | 'max'
 }
 
-// 默认 AI 配置
-export const createDefaultAiConfig = (): AiConfig => ({
-    enabled: false,
+// 默认端点配置
+export const createDefaultAiEndpointConfig = (): AiEndpointConfig => ({
     base_url: 'https://api.openai.com/v1',
     api_key: '',
     model: '',
-    ffmpeg_path: '',
     thinking: true,
     reasoning_effort: 'low'
+})
+
+// 将可能来自旧结构/为空白的端点配置归一化为完整字段（供保存到 Rust 端使用）
+const buildAiEndpointConfig = (endpoint?: Partial<AiEndpointConfig> | null): AiEndpointConfig => {
+    const fallback = createDefaultAiEndpointConfig()
+    const source = endpoint || {}
+    return {
+        base_url: source.base_url || '',
+        api_key: source.api_key || '',
+        model: source.model || '',
+        thinking: source.thinking ?? fallback.thinking,
+        reasoning_effort: source.reasoning_effort || fallback.reasoning_effort
+    }
+}
+
+// AI 标题生成配置（两步拆分，两个模型可指向不同服务商）
+export interface AiConfig {
+    enabled: boolean
+    /** ffmpeg 可执行文件路径（用于截帧，两步共用），留空时自动查找 */
+    ffmpeg_path: string
+    /** 图像识别模型配置（第一步：截帧识别画面） */
+    vision: AiEndpointConfig
+    /** 标题生成模型配置（第二步：基于识别信息创作标题） */
+    writer: AiEndpointConfig
+}
+
+// 默认 AI 配置
+export const createDefaultAiConfig = (): AiConfig => ({
+    enabled: false,
+    ffmpeg_path: '',
+    vision: createDefaultAiEndpointConfig(),
+    writer: createDefaultAiEndpointConfig()
 })
 
 // 配置根接口
@@ -729,11 +757,10 @@ export const useUserConfigStore = defineStore('userConfig', () => {
                 logLevel: configRoot.value.log_level,
                 coverMatchPath: configRoot.value.cover_match_path || '',
                 ai: {
-                    enabled: ai.enabled,
-                    base_url: ai.base_url || '',
-                    api_key: ai.api_key || '',
-                    model: ai.model || '',
-                    ffmpeg_path: ai.ffmpeg_path || ''
+                    enabled: !!ai.enabled,
+                    ffmpeg_path: ai.ffmpeg_path || '',
+                    vision: buildAiEndpointConfig(ai.vision),
+                    writer: buildAiEndpointConfig(ai.writer)
                 }
             })
             // 保存配置

@@ -9,17 +9,17 @@
 ## 全局配置字段
 - `max_curr`（最大并发任务数）、`auto_upload`、`auto_start`、`log_level`。
 - `cover_match_path`（封面匹配路径，String，2026-08-23 新增）：存放封面图片的文件夹路径，用于按标题关键字自动匹配封面。
-- `ai`（AiConfig 对象，2026-09-05 新增）：`{ enabled, base_url, api_key, model, ffmpeg_path, thinking, reasoning_effort }`，OpenAI 兼容接口配置，默认 base_url=`https://api.openai.com/v1`；`thinking` 默认 true（serde `default_true`）；`reasoning_effort` 默认 `"low"`（serde `default_reasoning_effort`，2026-09-06 新增，DeepSeek 官方取值 low/high/max）。
+- `ai`（AiConfig 对象，2026-09-05 新增，2026-09-07 拆分为两步双模型）：`{ enabled, ffmpeg_path, vision: AiEndpointConfig, writer: AiEndpointConfig }`；`AiEndpointConfig = { base_url, api_key, model, thinking, reasoning_effort }`，两端可指向不同服务商，ffmpeg 共用。默认 base_url=`https://api.openai.com/v1`；`thinking` 默认 true；`reasoning_effort` 默认 `"low"`（DeepSeek 官方取值 low/high/max）。旧扁平字段（ai.base_url 等）由自定义 Deserialize 一次性迁移到两端点。
 
-## AI 标题生成功能（2026-09-05 实现，2026-09-06 改为单标题自动应用）
-- `GlobalConfig.vue`：新增"AI 设置"分区（开启开关、Base URL、API Key 密码框、模型名、ffmpeg 路径+选择文件按钮）。
-- Rust 命令 `generate_ai_title(video_path, prompt)`（`src-tauri/src/commands/ai.rs`，返回 `Result<String>`）：校验配置 → `resolve_ffmpeg`（配置路径→PATH→Windows 常见目录）→ ffprobe/ffmpeg 探测时长 → `ffmpeg -ss dur-3 -frames:v 1 -c:v mjpeg` 截帧 → 请求 `{base}/chat/completions` 视觉接口（Bearer，120s 超时，temperature 1.2，stream false）→ 解析回复（`extract_message_content`，取 content 正文）。
-- 提示词迁移到前端（2026-09-06）：导出常量 `AI_TITLE_PROMPT`（`src/stores/utils.ts`，内容是梦三国2结算截图 → 提取胜负/比分/绿底行英雄/KDA → 自由创作 1 个 8-20 字含英雄名标题）；`generateAiTitle(videoPath, prompt = AI_TITLE_PROMPT)` 随 invoke 传给 Rust；Rust 端不内置提示词（删除了 AI_PROMPT 常量），prompt 为空返回明确错误。**改提示词只需改前端常量，无需重编 Rust**。
-- `VideoList.vue`：`.video-title` 末尾 sparkle svg（类 `.ai-icon`）→ 点击直接截帧请求，生成单个标题后自动通过 `emit('update:videos')` 回填 title 并 toast；生成中 svg 添加 `.is-generating` 旋转 loading（无候选对话框、无 `.ai-candidate-*`）。
-- 前端 store 方法：`utilsStore.generateAiTitle(videoPath): Promise<string>`。
-- 注意：AI 截帧依赖本机 ffmpeg；未配置/未安装时命令返回中文错误提示，需引导用户前往全局设置。
-- 使用要点（2026-09-05 查证）：OpenAI 兼容 /chat/completions 的 `model` 均为必填（含 DeepSeek 官方 API），不可留空；DeepSeek 视觉模型名为 `deepseek-v4-flash-vision-exp`（支持 base64 图片，普通 deepseek-v4-* 无法识别图片）；设置页模型名 placeholder 已含该示例。
-- VideoList 中传给 AI 截帧/删除源文件等操作的本地路径应使用 `video.original_file_path`（`video.path` 在上传完成后会被清空，两者语义不同），2026-09-05 已修正 `handleAiGenerateTitle` 两处取值。
+## AI 标题生成功能（两步双模型，2026-09-07 重构）
+- 架构：① `ai_analyze_video`（vision 端点：截帧 + 提取对局信息文本，temperature 0.2，返回 `{info, reasoning}`）→ ② `generate_ai_title`（writer 端点：纯文本请求，info 作为 system 上下文，temperature 1.2，返回 `{title, reasoning}`）。均在 `src-tauri/src/commands/ai.rs` 注册于 lib.rs。
+- 底层公共 `request_chat<F: FnMut(&str)>(endpoint, messages, temperature, on_reasoning)` 按 endpoint.thinking 自动走 SSE 流式/一次性；**async 命令内回调不可用 `&mut dyn FnMut`（future 非 Send），须用泛型闭包 F: FnMut**。
+- 提示词在前端（`src/stores/utils.ts`）：`AI_VISION_PROMPT`（识别结算画面→每行一条的对局信息文本）、`AI_WRITE_PROMPT`（基于给定信息创作含英雄名的标题）；`AI_TITLE_PROMPT` 保留为 writer 别名。**改提示词只改前端常量，无需重编 Rust**。Rust 侧 prompt 为空会返回明确错误。
+- 前端 store 方法：`utilsStore.analyzeVideo(videoPath, prompt?)`、`utilsStore.generateAiTitle(info, prompt?, onReasoning?)`。
+- `GlobalConfig.vue`：AI 设置区分两个编号分组卡片（图像识别 / 标题生成），表单字段 `ai_vision_*` / `ai_writer_*`；`isAiConfigured` 需两端 base_url/api_key/model 均完整。
+- `VideoList.vue`：sparkle 一键两步串联 → 回填 title；识别出的对局信息存 `aiInfos[videoId]` 展示于条目（`.ai-vision-info`，可 × 清除，随列表清理）。
+- 注意：AI 截帧依赖本机 ffmpeg（两步共用 `ai.ffmpeg_path`）；DeepSeek 视觉模型 `deepseek-v4-flash-vision-exp` 支持 base64 图片，普通 deepseek-v4-* 不能识别图片；OpenAI 系不支持 thinking 参数需在设置中关闭。
+- VideoList 传给 AI/删除等操作的本地路径用 `video.original_file_path`（`video.path` 上传后会清空）。
 
 ## 封面匹配功能（2026-08-23 实现）
 - `GlobalConfig.vue`：新增"封面匹配路径"配置项，输入框 + "选择文件夹"按钮（`open({ directory: true })`，来自 `@tauri-apps/plugin-dialog`）。

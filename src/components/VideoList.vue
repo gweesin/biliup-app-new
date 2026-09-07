@@ -210,8 +210,8 @@
                                             aiBatchRunning
                                                 ? '批量 AI 生成中，可稍后单独生成'
                                                 : aiGeneratingVideoIds.has(video.id)
-                                                  ? 'AI 正在生成标题…'
-                                                  : 'AI 一键生成标题（截取视频最后3秒画面）'
+                                                  ? 'AI 正在识别画面并生成标题…'
+                                                  : 'AI 一键生成标题（截帧识别对局信息 → 生成标题）'
                                         "
                                         @click.stop.prevent="handleAiGenerateTitle(video)"
                                     >
@@ -257,6 +257,19 @@
                             :reasoning="aiReasonStates[video.id].reasoning"
                             :thinking="aiReasonStates[video.id].thinking"
                         />
+
+                        <!-- 图像识别出的对局信息（一键两步生成后的中间结果，供事后核对） -->
+                        <div v-if="aiInfos[video.id]" class="ai-vision-info">
+                            <span class="ai-vision-tag">AI 识别</span>
+                            <span class="ai-vision-text">{{ aiInfos[video.id] }}</span>
+                            <el-icon
+                                class="ai-vision-clear"
+                                title="清除识别信息"
+                                @click.stop="removeAiInfo(video.id)"
+                            >
+                                <close />
+                            </el-icon>
+                        </div>
 
                         <!-- 每个视频独立封面设置 -->
                         <div class="video-cover-row">
@@ -341,6 +354,7 @@ import {
     Cloudy,
     Edit,
     Delete,
+    Close,
     UploadFilled,
     FolderOpened,
     CircleClose,
@@ -349,7 +363,7 @@ import {
 import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore, createEmptyTitleAffix } from '../stores/user_config'
 import type { TitleAffix } from '../stores/user_config'
-import { useUtilsStore, AI_TITLE_PROMPT } from '../stores/utils'
+import { useUtilsStore, AI_VISION_PROMPT, AI_WRITE_PROMPT } from '../stores/utils'
 import FloderWatch from './FloderWatch.vue'
 import CoverUploader from './CoverUploader.vue'
 import AiReasoningPanel from './AiReasoningPanel.vue'
@@ -460,6 +474,44 @@ const clearReasonState = (videoId: string) => {
     delete next[videoId]
     aiReasonStates.value = next
 }
+
+// ---- 图像识别出的对局信息展示（步骤一的中间结果，供事后核对）----
+// 一键生成时先在条目上保留识别出的对局信息文本，可点 × 单独清除；
+// 会随上方 reasoning 面板一起在列表变化时清理失效 id
+const aiInfos = ref<Record<string, string>>({})
+
+const removeAiInfo = (videoId: string) => {
+    if (!aiInfos.value[videoId]) return
+    const next = { ...aiInfos.value }
+    delete next[videoId]
+    aiInfos.value = next
+}
+
+// 视频列表变化时清理已移除条目的本地 AI 状态（reasoning / 识别信息）
+watch(
+    () => props.videos.map(video => video.id).join(','),
+    () => {
+        const aliveIds = new Set(props.videos.map(video => video.id))
+        const pruneMap = (current: Record<string, any>, onRemove?: (id: string) => void) => {
+            let removed = false
+            const next = { ...current }
+            for (const id of Object.keys(next)) {
+                if (!aliveIds.has(id)) {
+                    onRemove?.(id)
+                    delete next[id]
+                    removed = true
+                }
+            }
+            return removed ? next : current
+        }
+        if (aiReasonStates.value && Object.keys(aiReasonStates.value).length > 0) {
+            aiReasonStates.value = pruneMap(aiReasonStates.value, id => pendingReasoning.delete(id))
+        }
+        if (aiInfos.value && Object.keys(aiInfos.value).length > 0) {
+            aiInfos.value = pruneMap(aiInfos.value)
+        }
+    }
+)
 
 // 文件夹监控对话框状态
 const showFolderWatchDialog = ref(false)
@@ -930,10 +982,22 @@ const saveVideoTitle = (id: string) => {
     cancelEditVideoTitle()
 }
 
-// 检查 AI 配置是否已就绪（启用且已填接口地址/Key/模型）
+// 检查 AI 配置是否已就绪（启用，且「图像识别」与「标题生成」两个模型均已填好接口地址/Key/模型）
 const isAiConfigured = (): boolean => {
     const ai = userConfigStore.configRoot?.ai
-    return !!ai && !!ai.enabled && !!ai.api_key && !!ai.model
+    if (!ai || !ai.enabled) return false
+    const vision = ai.vision
+    const writer = ai.writer
+    return !!(
+        vision &&
+        vision.base_url &&
+        vision.api_key &&
+        vision.model &&
+        writer &&
+        writer.base_url &&
+        writer.api_key &&
+        writer.model
+    )
 }
 
 // 对单个视频执行 AI 标题生成的核心逻辑（静默，不弹 toast）：
@@ -960,13 +1024,13 @@ const runAiTitleForVideo = async (
         return { status: 'skipped' }
     }
 
-    // 思考模式开启时后端走 SSE 流式，把推理过程增量回传展示；
+    // 标题生成模型开启思考模式时后端走 SSE 流式，把推理过程增量回传展示；
     // 未开启时模型不会返回 reasoning，走一次性请求即可
     const aiConfig = userConfigStore.configRoot?.ai
-    const wantThinking = !!(aiConfig && aiConfig.thinking)
+    const wantThinking = !!(aiConfig?.writer && aiConfig.writer.thinking)
 
     aiGeneratingVideoIds.value.add(video.id)
-    // 先展示「深度思考中」面板
+    // 先展示「深度思考中」面板（占位文案即识别阶段：正在分析画面与对局信息…）
     aiReasonStates.value = {
         ...aiReasonStates.value,
         [video.id]: { reasoning: '', thinking: true }
@@ -978,9 +1042,22 @@ const runAiTitleForVideo = async (
     let keepReason = false
     let appliedTitle = ''
     try {
+        // ---- 步骤一：图像识别 ----
+        // 截帧交给「图像识别」模型，提取出对局信息文本；
+        // 成功后先展示在条目上供核对，再进入步骤二
+        let visionInfo = ''
+        const analyze = await utilsStore.analyzeVideo(localPath, AI_VISION_PROMPT)
+        visionInfo = String(analyze?.info || '').trim()
+        if (visionInfo) {
+            aiInfos.value = { ...aiInfos.value, [video.id]: visionInfo }
+        } else {
+            throw new Error('图像识别未返回对局信息，请检查图像识别模型是否支持图片输入后重试')
+        }
+
+        // ---- 步骤二：标题创作 ----
         const result = await utilsStore.generateAiTitle(
-            localPath,
-            AI_TITLE_PROMPT,
+            visionInfo,
+            AI_WRITE_PROMPT,
             wantThinking ? (delta: string) => appendReasoningDelta(video.id, delta) : undefined
         )
         const newTitle = String(result?.title || '')
@@ -1046,7 +1123,7 @@ const handleAiGenerateTitle = async (video: any) => {
     }
     if (!isAiConfigured()) {
         utilsStore.showMessage(
-            '尚未配置 AI 服务，请先在「全局设置 → AI 设置」中开启并填写接口地址 / API Key / 模型',
+            '尚未完整配置 AI 两步服务：请先在「全局设置 → AI 设置」中开启，并分别填写图像识别与标题生成两个模型的接口地址 / API Key / 模型',
             'warning'
         )
         return
@@ -1073,7 +1150,7 @@ const handleAiBatchGenerateTitle = async () => {
     }
     if (!isAiConfigured()) {
         utilsStore.showMessage(
-            '尚未配置 AI 服务，请先在「全局设置 → AI 设置」中开启并填写接口地址 / API Key / 模型',
+            '尚未完整配置 AI 两步服务：请先在「全局设置 → AI 设置」中开启，并分别填写图像识别与标题生成两个模型的接口地址 / API Key / 模型',
             'warning'
         )
         return
@@ -1394,6 +1471,7 @@ const getVideoWarningTooltip = (video: any): string => {
 // 处理删除文件
 const handleRemoveFile = (id: string) => {
     clearReasonState(id)
+    removeAiInfo(id)
     emit('removeFile', id)
 }
 
@@ -1611,6 +1689,51 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
 
 .video-cover-row {
     margin-top: 8px;
+}
+
+/* 图像识别出的对局信息（步骤一中间结果） */
+.ai-vision-info {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin-top: 6px;
+    padding: 5px 8px;
+    border: 1px dashed #c0b3e8;
+    border-radius: 4px;
+    background: #f7f4ff;
+    line-height: 1.5;
+}
+
+.ai-vision-tag {
+    flex-shrink: 0;
+    margin-top: 1px;
+    padding: 0 5px;
+    border-radius: 3px;
+    background: #722ed1;
+    color: #fff;
+    font-size: 10px;
+    line-height: 16px;
+}
+
+.ai-vision-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: #722ed1;
+    font-size: 11px;
+    word-break: break-word;
+    white-space: pre-line;
+}
+
+.ai-vision-clear {
+    flex-shrink: 0;
+    margin-top: 1px;
+    color: #c0c4cc;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.ai-vision-clear:hover {
+    color: #f56c6c;
 }
 
 .video-title-container {

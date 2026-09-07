@@ -263,7 +263,8 @@ pub async fn run() {
             rename_user_template,
             save_template_order,
             save_user_order,
-            // AI 标题生成
+            // AI 标题生成（两步：图像识别 → 基于识别信息创作标题）
+            ai_analyze_video,
             generate_ai_title,
             // 其他命令
             get_current_version,
