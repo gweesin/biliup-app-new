@@ -1048,6 +1048,10 @@ const runAiTitleForVideo = async (
         let visionInfo = ''
         const analyze = await utilsStore.analyzeVideo(localPath, AI_VISION_PROMPT)
         visionInfo = String(analyze?.info || '').trim()
+        // 视频可能已在批量生成期间被删除：识别完成后若已不在当前列表，直接跳过
+        if (!props.videos.some(item => item.id === video.id)) {
+            return { status: 'skipped' }
+        }
         if (visionInfo) {
             aiInfos.value = { ...aiInfos.value, [video.id]: visionInfo }
         } else {
@@ -1064,10 +1068,14 @@ const runAiTitleForVideo = async (
             .trim()
             .slice(0, 80)
         finalReasoning = String(result?.reasoning || '').trim()
+        // 生成期间可能被删除：应用标题前再次确认视频仍存在，避免把删除项写回列表
+        if (!props.videos.some(item => item.id === video.id)) {
+            return { status: 'skipped' }
+        }
         if (newTitle) {
             // 并行任务可能在同一时间返回：等父组件把已完成的标题同步回 props，
             // 再基于最新的 videos 更新，避免并发结果互相覆盖。
-            // 批量模式下外层会基于本地累积快照合并后统一 emit，逻辑更稳妥
+            // 批量模式下外层会基于最新列表 + 已应用标题 map 合并后统一 emit，逻辑更稳妥
             await nextTick()
             if (options?.onApplied) {
                 options.onApplied(video.id, newTitle)
@@ -1179,11 +1187,16 @@ const handleAiBatchGenerateTitle = async () => {
     aiBatchDone.value = 0
     const stats = { applied: 0, empty: 0, failed: 0, skipped: 0 }
 
-    // 基于本地累积快照逐条合并标题后再 emit，避免并发任务用过期 props 互相覆盖
-    let pendingVideos = [...props.videos]
+    // 每次 emit 都以「当前最新列表 + 已应用标题」合并：
+    // - 标题累积在本地 map，并发任务先后完成不会用过期列表互相覆盖
+    // - 始终以 props.videos（父组件的最新列表）为基准，批量期间删除的视频不会被快照带回
+    const appliedTitles = new Map<string, string>()
     const onApplied = (videoId: string, title: string) => {
-        pendingVideos = pendingVideos.map(item => (item.id === videoId ? { ...item, title } : item))
-        emit('update:videos', pendingVideos)
+        appliedTitles.set(videoId, title)
+        const newVideos = props.videos.map(item =>
+            appliedTitles.has(item.id) ? { ...item, title: appliedTitles.get(item.id)! } : item
+        )
+        emit('update:videos', newVideos)
     }
 
     let nextIndex = 0
@@ -1191,7 +1204,14 @@ const handleAiBatchGenerateTitle = async () => {
     const runWorker = async () => {
         while (nextIndex < toRun.length) {
             const index = nextIndex++
-            const result = await runAiTitleForVideo(toRun[index], { onApplied })
+            const target = toRun[index]
+            // 批量生成期间可能被删除：已不在当前列表的视频跳过，不再发起 AI 请求
+            if (!props.videos.some(v => v.id === target.id)) {
+                stats.skipped++
+                aiBatchDone.value = Math.min(toRun.length, aiBatchDone.value + 1)
+                continue
+            }
+            const result = await runAiTitleForVideo(target, { onApplied })
             if (result.status === 'applied') stats.applied++
             else if (result.status === 'empty') stats.empty++
             else if (result.status === 'failed') stats.failed++
