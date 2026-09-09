@@ -62,6 +62,7 @@ pub async fn save_global_config(
     auto_upload: bool,
     log_level: String,
     cover_match_path: String,
+    delete_source_on_remove: bool,
     ai: AiConfig,
 ) -> Result<bool, AppError> {
     let app_data = app.state::<AppData>();
@@ -74,6 +75,7 @@ pub async fn save_global_config(
         auto_upload,
         log_level,
         cover_match_path,
+        delete_source_on_remove,
         ai,
     );
 

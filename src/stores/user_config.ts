@@ -152,6 +152,8 @@ interface ConfigRoot {
     auto_start: boolean
     log_level: string
     cover_match_path: string
+    /** 删除模板中的视频条目时是否同时删除本地原文件（删除确认框的默认勾选项） */
+    delete_source_on_remove: boolean
     ai: AiConfig
     config: Record<number, UserConfig> // uid -> 用户配置
 }
@@ -446,6 +448,7 @@ export const useUserConfigStore = defineStore('userConfig', () => {
                 auto_upload: true,
                 log_level: 'info',
                 cover_match_path: '',
+                delete_source_on_remove: false,
                 ai: createDefaultAiConfig(),
                 config: {}
             }
@@ -736,7 +739,13 @@ export const useUserConfigStore = defineStore('userConfig', () => {
         updates: Partial<
             Pick<
                 ConfigRoot,
-                'max_curr' | 'auto_upload' | 'auto_start' | 'log_level' | 'cover_match_path' | 'ai'
+                | 'max_curr'
+                | 'auto_upload'
+                | 'auto_start'
+                | 'log_level'
+                | 'cover_match_path'
+                | 'delete_source_on_remove'
+                | 'ai'
             >
         >
     ) => {
@@ -756,6 +765,7 @@ export const useUserConfigStore = defineStore('userConfig', () => {
                 autoUpload: configRoot.value.auto_upload,
                 logLevel: configRoot.value.log_level,
                 coverMatchPath: configRoot.value.cover_match_path || '',
+                deleteSourceOnRemove: !!configRoot.value.delete_source_on_remove,
                 ai: {
                     enabled: !!ai.enabled,
                     ffmpeg_path: ai.ffmpeg_path || '',

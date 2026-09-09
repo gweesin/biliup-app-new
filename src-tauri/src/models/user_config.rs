@@ -367,6 +367,9 @@ pub struct ConfigRoot {
     pub log_level: String,
     #[serde(default)]
     pub cover_match_path: String,
+    /// 从模板中删除视频条目时是否同时删除本地原文件（删除确认框的默认勾选项）
+    #[serde(default)]
+    pub delete_source_on_remove: bool,
     #[serde(default)]
     pub ai: AiConfig,
     #[serde(default)]
@@ -514,15 +517,17 @@ impl ConfigRoot {
         auto_upload: bool,
         log_level: String,
         cover_match_path: String,
+        delete_source_on_remove: bool,
         ai: AiConfig,
     ) -> &Self {
         info!(
-            "更新全局配置: max_curr={}, auto_start={}, auto_upload={}, log_level={}, cover_match_path={}, ai_enabled={}, vision_model={}, writer_model={}",
+            "更新全局配置: max_curr={}, auto_start={}, auto_upload={}, log_level={}, cover_match_path={}, delete_source_on_remove={}, ai_enabled={}, vision_model={}, writer_model={}",
             max_curr,
             auto_start,
             auto_upload,
             log_level,
             cover_match_path,
+            delete_source_on_remove,
             ai.enabled,
             ai.vision.model,
             ai.writer.model
@@ -532,6 +537,7 @@ impl ConfigRoot {
         self.auto_upload = auto_upload;
         self.log_level = log_level;
         self.cover_match_path = cover_match_path;
+        self.delete_source_on_remove = delete_source_on_remove;
         self.ai = ai;
 
         self
@@ -654,6 +660,7 @@ impl Default for ConfigRoot {
             auto_upload: true,
             log_level: default_log_level(),
             cover_match_path: String::new(),
+            delete_source_on_remove: false,
             ai: AiConfig::default(),
             user_order: Vec::new(),
             config: HashMap::new(),

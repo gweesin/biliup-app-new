@@ -222,6 +222,14 @@
                                         />
                                     </svg>
                                 </div>
+                                <!-- 视频原文件路径：标题下方一行浅浅的小字 -->
+                                <div
+                                    v-if="getVideoLocalPath(video)"
+                                    class="video-file-path"
+                                    :title="getVideoLocalPath(video)"
+                                >
+                                    {{ getVideoLocalPath(video) }}
+                                </div>
                             </div>
 
                             <!-- 状态标签移动到文件名右侧 -->
@@ -930,6 +938,11 @@ const handleReorderVideo = (currentIndex: number, newIndex: number) => {
     newVideos.splice(newIndex, 0, movedItem)
 
     emit('update:videos', newVideos)
+}
+
+// 获取视频本地原文件路径：original_file_path（持久化字段）优先，其次 video.path
+const getVideoLocalPath = (video: any): string => {
+    return String(video.original_file_path || video.path || '').trim()
 }
 
 const getVideoSortName = (video: any) => {
@@ -1759,6 +1772,21 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
 .video-title-container {
     flex: 1;
     min-width: 0;
+}
+
+/* 视频原文件路径小字：标题下方浅浅显示，过长省略、悬停显示完整路径 */
+.video-file-path {
+    font-size: 10px;
+    color: #c0c4cc;
+    line-height: 1.3;
+    padding: 0 4px 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.video-file-path:hover {
+    color: #909399;
 }
 
 .video-title {

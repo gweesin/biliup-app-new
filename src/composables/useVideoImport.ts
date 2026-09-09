@@ -1,11 +1,12 @@
-import { ElMessageBox } from 'element-plus'
-import { ref, type Ref } from 'vue'
+import { ElCheckbox, ElMessageBox } from 'element-plus'
+import { h, ref, type Ref } from 'vue'
 import { v4 as uuidv4 } from 'uuid'
 import { open } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
 import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore } from '../stores/user_config'
 import { useUtilsStore } from '../stores/utils'
+import { deleteOriginalVideoFile } from '../utils/videoFileCleanup'
 
 /** 支持的视频扩展名 */
 const VIDEO_EXTENSIONS = [
@@ -245,6 +246,70 @@ export const useVideoImport = (context: VideoImportContext) => {
         }
     }
 
+    // 带「同时删除原文件」复选框的删除确认框：
+    // 复选框初值来自全局配置 delete_source_on_remove；确认后把勾选结果持久化到全局配置（静默，失败不影响删除流程）。
+    // 返回 { confirmed, deleteSource }，deleteSource 为确认时复选框的勾选状态。
+    const confirmDeleteWithSourceOption = async (
+        messageText: string,
+        title: string,
+        confirmText = '确定删除'
+    ): Promise<{ confirmed: boolean; deleteSource: boolean }> => {
+        const deleteSource = ref<boolean>(
+            Boolean(userConfigStore.configRoot?.delete_source_on_remove)
+        )
+
+        const message = h('div', { style: 'line-height: 1.7; word-break: break-word' }, [
+            h('div', null, messageText),
+            h(
+                'div',
+                { style: 'margin-top: 10px' },
+                h(
+                    ElCheckbox,
+                    {
+                        // 非受控模式：ElMessageBox 只渲染一次 message，受控（modelValue）时
+                        // 点击后 props 不更新会导致 UI 无法勾选；改为用 checked 初始化、
+                        // 组件内部自行维护状态，通过 change 事件回读最新值
+                        checked: deleteSource.value,
+                        onChange: (val: any) => {
+                            deleteSource.value = Boolean(val)
+                        }
+                    },
+                    () => '同时删除本地原文件'
+                )
+            )
+        ])
+
+        try {
+            await ElMessageBox({
+                title,
+                message,
+                confirmButtonText: confirmText,
+                cancelButtonText: '取消',
+                type: 'warning',
+                showClose: false
+            })
+        } catch {
+            // 用户取消（或关闭）
+            return { confirmed: false, deleteSource: deleteSource.value }
+        }
+
+        // 确认后持久化复选框选择，与其它全局配置一致
+        try {
+            if (
+                Boolean(userConfigStore.configRoot?.delete_source_on_remove) !==
+                deleteSource.value
+            ) {
+                await userConfigStore.updateGlobalConfig({
+                    delete_source_on_remove: deleteSource.value
+                })
+            }
+        } catch (error) {
+            console.error('保存「删除原文件」配置失败:', error)
+        }
+
+        return { confirmed: true, deleteSource: deleteSource.value }
+    }
+
     // 清空所有文件
     const clearAllVideos = async () => {
         if (!currentForm.value?.videos || currentForm.value.videos.length === 0) {
@@ -256,12 +321,14 @@ export const useVideoImport = (context: VideoImportContext) => {
 
         templateLoading.value = true
         try {
-            await ElMessageBox.confirm(`确定要清空所有已选择的 ${videoText} 吗？`, '确认清空文件', {
-                confirmButtonText: '确定清空',
-                cancelButtonText: '取消',
-                type: 'warning',
-                dangerouslyUseHTMLString: false
-            })
+            const { confirmed, deleteSource } = await confirmDeleteWithSourceOption(
+                `确定要清空所有已选择的 ${videoText} 吗？此操作不可撤销。`,
+                '确认清空文件',
+                '确定清空'
+            )
+            if (!confirmed) {
+                return
+            }
 
             // 取消所有对应的上传任务
             const videoIds = currentForm.value.videos.map((video: any) => video.id)
@@ -279,9 +346,30 @@ export const useVideoImport = (context: VideoImportContext) => {
                 }
             }
 
+            // 先暂存待删除的视频，清空列表后再按需删除原文件
+            const videosToRemove = [...currentForm.value.videos]
+
             // 清空视频文件列表
             currentForm.value.videos = []
-            utilsStore.showMessage(`已清空 ${videoText}`, 'success')
+
+            // 勾选了「同时删除原文件」时批量删除本地源文件
+            let deletedCount = 0
+            if (deleteSource) {
+                for (const video of videosToRemove) {
+                    if (await deleteOriginalVideoFile(video)) {
+                        deletedCount++
+                    }
+                }
+            }
+
+            utilsStore.showMessage(
+                deleteSource
+                    ? deletedCount > 0
+                        ? `已清空 ${videoText}，并删除 ${deletedCount} 个原文件`
+                        : `已清空 ${videoText}（未找到可删除的原文件）`
+                    : `已清空 ${videoText}`,
+                'success'
+            )
         } catch {
             // 用户取消了操作
         } finally {
@@ -301,16 +389,14 @@ export const useVideoImport = (context: VideoImportContext) => {
             const video = currentForm.value.videos[videoIndex]
 
             try {
-                // 添加确认弹窗
-                await ElMessageBox.confirm(
+                // 确认弹窗（含「同时删除原文件」复选框）
+                const { confirmed, deleteSource } = await confirmDeleteWithSourceOption(
                     `确定要删除视频文件"${video.title}"吗？此操作不可撤销。`,
-                    '确认删除文件',
-                    {
-                        confirmButtonText: '确定删除',
-                        cancelButtonText: '取消',
-                        type: 'warning'
-                    }
+                    '确认删除文件'
                 )
+                if (!confirmed) {
+                    return
+                }
 
                 // 先查找并取消对应的上传任务
                 const correspondingTask = uploadStore.uploadQueue.find(
@@ -329,7 +415,20 @@ export const useVideoImport = (context: VideoImportContext) => {
                 // 删除视频文件
                 currentForm.value.videos.splice(videoIndex, 1)
 
-                utilsStore.showMessage('文件删除成功', 'success')
+                // 勾选了「同时删除原文件」时删除本地源文件
+                if (deleteSource) {
+                    const deleted = await deleteOriginalVideoFile(video)
+                    if (deleted) {
+                        utilsStore.showMessage('文件删除成功，已同时删除原文件', 'success')
+                    } else {
+                        utilsStore.showMessage(
+                            '文件删除成功，但原文件删除失败，请手动清理',
+                            'warning'
+                        )
+                    }
+                } else {
+                    utilsStore.showMessage('文件删除成功', 'success')
+                }
             } catch (error) {
                 // 如果用户取消了确认框，不显示错误消息
                 if (error !== 'cancel') {
