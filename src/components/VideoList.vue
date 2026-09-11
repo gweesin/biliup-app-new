@@ -222,13 +222,19 @@
                                         />
                                     </svg>
                                 </div>
-                                <!-- 视频原文件路径：标题下方一行浅浅的小字 -->
+                                <!-- 视频原文件路径：标题下方一行浅浅的小字，点击复制路径 -->
                                 <div
                                     v-if="getVideoLocalPath(video)"
                                     class="video-file-path"
-                                    :title="getVideoLocalPath(video)"
+                                    :title="`点击复制路径：${getVideoLocalPath(video)}`"
+                                    @click="copyVideoPath(video)"
                                 >
-                                    {{ getVideoLocalPath(video) }}
+                                    <el-icon class="video-file-path-copy"
+                                        ><copy-document
+                                    /></el-icon>
+                                    <span class="video-file-path-text">{{
+                                        getVideoLocalPath(video)
+                                    }}</span>
                                 </div>
                             </div>
 
@@ -366,7 +372,8 @@ import {
     UploadFilled,
     FolderOpened,
     CircleClose,
-    VideoPause
+    VideoPause,
+    CopyDocument
 } from '@element-plus/icons-vue'
 import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore, createEmptyTitleAffix } from '../stores/user_config'
@@ -943,6 +950,20 @@ const handleReorderVideo = (currentIndex: number, newIndex: number) => {
 // 获取视频本地原文件路径：original_file_path（持久化字段）优先，其次 video.path
 const getVideoLocalPath = (video: any): string => {
     return String(video.original_file_path || video.path || '').trim()
+}
+
+// 复制视频原文件路径到剪贴板
+const copyVideoPath = async (video: any) => {
+    const path = getVideoLocalPath(video)
+    if (!path) {
+        return
+    }
+    try {
+        await navigator.clipboard.writeText(path)
+        utilsStore.showMessage('视频路径已复制', 'success')
+    } catch {
+        utilsStore.showMessage('复制失败，请手动复制路径', 'warning')
+    }
 }
 
 const getVideoSortName = (video: any) => {
@@ -1774,19 +1795,36 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
     min-width: 0;
 }
 
-/* 视频原文件路径小字：标题下方浅浅显示，过长省略、悬停显示完整路径 */
+/* 视频原文件路径小字：标题下方浅浅显示，过长省略；点击可复制，移入 pointer 提示 */
 .video-file-path {
+    display: flex;
+    align-items: center;
+    gap: 3px;
     font-size: 10px;
     color: #c0c4cc;
     line-height: 1.3;
-    padding: 0 4px 2px;
+    padding: 2px 4px;
+    border-radius: 3px;
     white-space: nowrap;
     overflow: hidden;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.video-file-path-text {
+    overflow: hidden;
+    white-space: nowrap;
     text-overflow: ellipsis;
 }
 
+.video-file-path-copy {
+    flex-shrink: 0;
+    font-size: 11px;
+}
+
 .video-file-path:hover {
-    color: #909399;
+    color: #409eff;
+    background: rgba(64, 158, 255, 0.1);
 }
 
 .video-title {
