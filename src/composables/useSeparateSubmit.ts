@@ -3,7 +3,7 @@ import { ElMessageBox } from 'element-plus'
 import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore } from '../stores/user_config'
 import { useUtilsStore } from '../stores/utils'
-import { deleteOriginalVideoFile, deleteOriginalVideoFiles } from '../utils/videoFileCleanup'
+import { clearDeletedVideoFilePaths } from '../utils/videoFileCleanup'
 import { isVideoReadyForSeparateSubmit } from '../utils/videoSubmit'
 import type { SeparateSubmitState, SubmitStatsInput } from '../types/submit'
 
@@ -237,76 +237,41 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
     }
 
     /**
-     * 获取稿件首个分P的 cid
-     * 上传阶段拿不到 cid（biliup 上传结果不返回 cid），而加入合集必须携带 cid，
-     * 因此投稿请求完成后需要单独按 aid 查询一次
+     * 处理后端 submit 一次性返回的删除/合集结果：
+     * - 根据 deleted_file_paths 清空对应视频的 original_file_path（源文件已由后端删除）
+     * - 根据 season 结果给出合集加入/切换提示（失败只提示，不阻塞）
+     * @param videosRef 需要同步删除状态的对象数组（分稿件模式下传目标模板的 videos 本身）
      */
-    const resolveSeasonCid = async (uid: number, aid: number, template: any) => {
-        const configuredCid = Number(template?.videos?.[0]?.cid || 0)
-        if (configuredCid > 0) {
-            return configuredCid
+    const handleSubmitOutcome = (
+        resp: any,
+        template: any,
+        videosRef?: any[] | null
+    ) => {
+        const data = resp?.data && typeof resp?.data === 'object' ? resp.data : {}
+        const bvid = data?.bvid ? String(data.bvid) : data?.aid != null ? String(data.aid) : '-'
+
+        // 1. 同步删除结果：源文件已由后端删除，清空配置中的路径
+        const deletedPaths: string[] = Array.isArray(resp?.deleted_file_paths)
+            ? resp.deleted_file_paths
+            : []
+        if (deletedPaths.length > 0) {
+            clearDeletedVideoFilePaths(videosRef ?? template?.videos, deletedPaths)
         }
 
-        for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-                const cid = Number(await utilsStore.getVideoCid(uid, aid))
-                if (cid > 0) {
-                    return cid
-                }
-            } catch (error) {
-                console.error('获取稿件 cid 失败: ', error)
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 1000))
-        }
-
-        return 0
-    }
-
-    const syncSeasonAfterSubmit = async (uid: number, resp: any, template: any) => {
-        if (!(resp && resp.aid && utilsStore.hasSeason)) {
+        // 2. 合集结果提示
+        const season = resp?.season
+        if (!season || !season.attempted) {
             return
         }
-
-        const isNewSubmission = !template?.aid
-        const configuredSeasonId = Number(template?.season_id || 0)
-        // 新增稿件未设置合集时，不触发合集提交
-        if (isNewSubmission && configuredSeasonId <= 0) {
-            return
-        }
-
-        try {
-            const old_season_id = Number((await utilsStore.getVideoSeason(uid, resp.aid)) || 0)
-            const cid = await resolveSeasonCid(uid, resp.aid, template)
-
-            if (!cid) {
-                utilsStore.showMessage(`视频${resp.bvid}加入合集失败：未能获取稿件 cid`, 'error')
-                return
-            }
-
-            if (old_season_id !== configuredSeasonId) {
-                const new_section_id = Number(template?.section_id || 0)
-                // 稿件尚未加入任何合集时使用新增接口，已在合集中则使用切换接口
-                const add = !(old_season_id > 0)
-                await utilsStore.switchSeason(
-                    uid,
-                    resp.aid,
-                    cid,
-                    configuredSeasonId,
-                    new_section_id,
-                    template?.title || '',
-                    add
-                )
-
-                const season_title =
-                    utilsStore.seasonlist.find((s: any) => s.season_id === template.season_id)
-                        ?.title || template.season_id
-                utilsStore.showMessage(`视频${resp.bvid}加入合集${season_title}`, 'success')
-                console.log(`视频${resp.bvid}加入合集${season_title}`, 'success')
-            }
-        } catch (error) {
-            console.error('设置合集失败: ', error)
-            utilsStore.showMessage(`设置合集失败: ${error}`, 'error')
+        if (season.ok && season.old_season_id !== season.new_season_id) {
+            const seasonTitle =
+                utilsStore.seasonlist.find(
+                    (s: any) => s.season_id === Number(template?.season_id)
+                )?.title || template?.season_id
+            utilsStore.showMessage(`视频${bvid}加入合集${seasonTitle}`, 'success')
+            console.log(`视频${bvid}加入合集${seasonTitle}`, 'success')
+        } else if (!season.ok) {
+            utilsStore.showMessage(`视频${bvid}设置合集失败: ${season.message || '未知错误'}`, 'error')
         }
     }
 
@@ -320,8 +285,11 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
             const userConfig = userConfigStore.configRoot?.config[uid]
             if (userConfig && userConfig.auto_edit && newTemplateRef.value) {
                 // 新增稿件且auto_edit开启，创建编辑模板
-                await newTemplateRef.value.createTemplateFromBV(uid, resp.bvid, resp.bvid, true)
-                utilsStore.showMessage('从BV号创建模板成功', 'success')
+                const bvid = resp?.data?.bvid
+                if (bvid) {
+                    await newTemplateRef.value.createTemplateFromBV(uid, bvid, bvid, true)
+                    utilsStore.showMessage('从BV号创建模板成功', 'success')
+                }
             }
         } else {
             if (selectedUser.value?.uid === uid && currentTemplateName.value === templateName) {
@@ -357,7 +325,7 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
 
         try {
             const resp = (await uploadStore.submitTemplate(uid, template)) as any
-            const bvid = resp?.bvid ? String(resp.bvid) : '-'
+            const bvid = resp?.data?.bvid ? String(resp.data.bvid) : '-'
             recordSubmitStats({
                 user: user.username,
                 mode: '单稿件',
@@ -376,13 +344,11 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
                 setTimeout(() => lastPublishedBadgeRef.value?.refresh?.(), 1500)
             }
 
-            utilsStore.showMessage(`视频${resp.bvid}提交成功 (模板: ${templateName})`, 'success')
-            console.log(`视频${resp.bvid}提交成功 (模板: ${templateName})`, 'success')
+            utilsStore.showMessage(`视频${resp?.data?.bvid}提交成功 (模板: ${templateName})`, 'success')
+            console.log(`视频${resp?.data?.bvid}提交成功 (模板: ${templateName})`, 'success')
 
-            // 稿件发布成功后删除模板中所有视频的原始本地文件
-            await deleteOriginalVideoFiles(template?.videos)
-
-            await syncSeasonAfterSubmit(uid, resp, template)
+            // 删除本地源文件与合集处理已由后端 submit 一次性完成，这里只同步状态并提示
+            handleSubmitOutcome(resp, template, template?.videos)
 
             await new Promise(resolve => setTimeout(resolve, 500))
 
@@ -583,19 +549,19 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
                     cancelKey
                 })) as any
                 submitState.successCount++
-                if (resp?.bvid) {
-                    submitState.successBvids.push(resp.bvid)
+                if (resp?.data?.bvid) {
+                    submitState.successBvids.push(resp.data.bvid)
                 }
                 recordSubmitStats({
                     user: getSubmitUserLabel(uid),
                     mode: '多稿件',
                     templateName,
                     status: 'success',
-                    bvid: resp?.bvid ? String(resp.bvid) : '-'
+                    bvid: resp?.data?.bvid ? String(resp.data.bvid) : '-'
                 })
 
-                // 稿件发布成功后删除该视频的原始本地文件
-                await deleteOriginalVideoFile(readyVideo)
+                // 删除本地源文件与合集处理已由后端 submit 一次性完成，这里只同步状态并提示
+                handleSubmitOutcome(resp, singleTemplate, targetTemplate.videos)
 
                 const removeIndex = targetTemplate.videos.findIndex(v => v.id === readyVideo.id)
                 if (removeIndex > -1) {
@@ -603,7 +569,6 @@ export const useSeparateSubmit = (context: SeparateSubmitContext) => {
                 }
 
                 try {
-                    await syncSeasonAfterSubmit(uid, resp, singleTemplate)
                     await handleAutoEditAfterSubmit(uid, templateName, singleTemplate, resp)
                 } catch (postError) {
                     console.error('提交后处理失败:', postError)

@@ -107,10 +107,10 @@ pub async fn get_file_size(file_path: String) -> Result<u64, AppError> {
     Ok(file_utils::get_file_size(path).map_err(AppError::Internal)?)
 }
 
-/// 删除原始本地视频文件（仅用于清理已发布/上传完成的稿件源文件）
-#[tauri::command]
-pub async fn delete_file(file_path: String) -> Result<bool, AppError> {
-    let path = Path::new(&file_path);
+/// 删除原始本地视频文件（仅用于清理已发布/上传完成的稿件源文件）。
+/// 供 `delete_file` 命令与 `submit` 命令的内部后处理共用。
+pub fn delete_local_video_file(file_path: &str) -> Result<bool, AppError> {
+    let path = Path::new(file_path);
 
     // 空路径直接视为删除成功，避免误报错误
     if file_path.trim().is_empty() {
@@ -119,10 +119,7 @@ pub async fn delete_file(file_path: String) -> Result<bool, AppError> {
 
     // 目录不删除，防止误删整个文件夹
     if path.is_dir() {
-        return Err(AppError::Custom(format!(
-            "拒绝删除目录: {}",
-            file_path
-        )));
+        return Err(AppError::Custom(format!("拒绝删除目录: {file_path}")));
     }
 
     // 文件不存在视为已删除
@@ -141,15 +138,18 @@ pub async fn delete_file(file_path: String) -> Result<bool, AppError> {
         .unwrap_or("")
         .to_lowercase();
     if !allowed_exts.contains(&ext.as_str()) {
-        return Err(AppError::Custom(format!(
-            "拒绝删除非视频文件: {}",
-            file_path
-        )));
+        return Err(AppError::Custom(format!("拒绝删除非视频文件: {file_path}")));
     }
 
     std::fs::remove_file(path).map_err(AppError::Io)?;
-    info!("已删除原始视频文件: {}", file_path);
+    info!("已删除原始视频文件: {file_path}");
     Ok(true)
+}
+
+/// 删除原始本地视频文件（Tauri 命令入口）
+#[tauri::command]
+pub async fn delete_file(file_path: String) -> Result<bool, AppError> {
+    delete_local_video_file(&file_path)
 }
 
 /// 递归读取目录
@@ -777,11 +777,10 @@ pub async fn get_video_detail(
     Ok(template_config)
 }
 
-#[tauri::command]
-pub async fn get_video_season(app: tauri::AppHandle, uid: u64, aid: u64) -> Result<u64, AppError> {
-    let app_data = app.state::<AppData>();
-
-    let bilibili = app_data.get_bilibili(uid).await?;
+/// 查询稿件当前所属合集 id（0 表示未加入任何合集）。
+/// 供 `get_video_season` 命令与 `submit` 命令的内部后处理共用。
+pub async fn query_video_season(app: &AppData, uid: u64, aid: u64) -> Result<u64, AppError> {
+    let bilibili = app.get_bilibili(uid).await?;
 
     match bilibili
         .client
@@ -807,11 +806,10 @@ pub async fn get_video_season(app: tauri::AppHandle, uid: u64, aid: u64) -> Resu
 ///
 /// 投稿接口（add/v3）只返回 aid 与 bvid，而加入合集（switch_season）必须携带 cid。
 /// 上传阶段 biliup 不会回传 cid，因此需要在投稿请求完成后单独查询一次。
-#[tauri::command]
-pub async fn get_video_cid(app: tauri::AppHandle, uid: u64, aid: u64) -> Result<u64, AppError> {
-    let app_data = app.state::<AppData>();
-
-    let proxy = app_data
+/// 视频信息接口偶发返回慢/空，最多重试 3 次（每次间隔 1s）后再返回。
+/// 供 `get_video_cid` 命令与 `submit` 命令的内部后处理共用。
+pub async fn query_video_cid(app: &AppData, uid: u64, aid: u64) -> Result<u64, AppError> {
+    let proxy = app
         .config
         .lock()
         .await
@@ -819,33 +817,52 @@ pub async fn get_video_cid(app: tauri::AppHandle, uid: u64, aid: u64) -> Result<
         .get(&uid)
         .and_then(|c| c.proxy.clone());
 
-    let bilibili = app_data.get_bilibili(uid).await?;
+    let bilibili = app.get_bilibili(uid).await?;
 
-    let res = bilibili
-        .video_data(&biliup::uploader::bilibili::Vid::Aid(aid), proxy.as_deref())
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("获取稿件视频信息失败: {e}")))?;
+    for attempt in 0..3 {
+        match bilibili
+            .video_data(&biliup::uploader::bilibili::Vid::Aid(aid), proxy.as_deref())
+            .await
+        {
+            Ok(res) => {
+                if let Some(cid) = res["videos"]
+                    .as_array()
+                    .and_then(|videos| videos.first())
+                    .and_then(|video| video["cid"].as_u64())
+                    .filter(|c| *c > 0)
+                {
+                    return Ok(cid);
+                }
+            }
+            Err(e) => {
+                if attempt == 2 {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "获取稿件视频信息失败: {e}"
+                    )));
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 
-    Ok(res["videos"]
-        .as_array()
-        .and_then(|videos| videos.first())
-        .and_then(|video| video["cid"].as_u64())
-        .unwrap_or(0))
+    Ok(0)
 }
 
-#[tauri::command]
-pub async fn switch_season(
-    app: tauri::AppHandle,
+/// 加入 / 切换合集：
+/// - add=true：把稿件加入指定合集的分区（season/section/episodes/add）
+/// - add=false：把稿件切换到目标合集（season/switch）
+/// 供 `switch_season` 命令与 `submit` 命令的内部后处理共用。
+pub async fn switch_season_inner(
+    app: &AppData,
     uid: u64,
     aid: u64,
     cid: u64,
     season_id: u64,
     section_id: u64,
-    title: String,
+    title: &str,
     add: bool,
-) -> Result<bool, AppError> {
-    let app_data = app.state::<AppData>();
-    let my_client = app_data.get_client(uid).await?;
+) -> Result<(), AppError> {
+    let my_client = app.get_client(uid).await?;
     let csrf = my_client.get_csrf()?;
 
     if add {
@@ -879,7 +896,7 @@ pub async fn switch_season(
                 serde_json::to_string(&res).unwrap_or_else(|_| "未知错误".to_string()),
             ));
         }
-        Ok(true)
+        Ok(())
     } else {
         let res = my_client
             .bilibili
@@ -908,8 +925,39 @@ pub async fn switch_season(
                 serde_json::to_string(&res).unwrap_or_else(|_| "未知错误".to_string()),
             ));
         }
-        Ok(true)
+        Ok(())
     }
+}
+
+/// 获取稿件当前所属合集 id（Tauri 命令入口）
+#[tauri::command]
+pub async fn get_video_season(app: tauri::AppHandle, uid: u64, aid: u64) -> Result<u64, AppError> {
+    let app_data = app.state::<AppData>();
+    query_video_season(&app_data, uid, aid).await
+}
+
+/// 查询稿件首个分P的 cid（Tauri 命令入口）
+#[tauri::command]
+pub async fn get_video_cid(app: tauri::AppHandle, uid: u64, aid: u64) -> Result<u64, AppError> {
+    let app_data = app.state::<AppData>();
+    query_video_cid(&app_data, uid, aid).await
+}
+
+/// 加入 / 切换合集（Tauri 命令入口）
+#[tauri::command]
+pub async fn switch_season(
+    app: tauri::AppHandle,
+    uid: u64,
+    aid: u64,
+    cid: u64,
+    season_id: u64,
+    section_id: u64,
+    title: String,
+    add: bool,
+) -> Result<bool, AppError> {
+    let app_data = app.state::<AppData>();
+    switch_season_inner(&app_data, uid, aid, cid, season_id, section_id, &title, add).await?;
+    Ok(true)
 }
 
 /// 导出日志

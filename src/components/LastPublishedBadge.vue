@@ -59,7 +59,7 @@ const fetchPublishedArchives = async (uid: number) => {
             !!(archive.title && archive.title.includes(title))
 
         // 1. 先查正在发布的稿件，命中即展示（可显示定时发布时间）
-        const pubingList = await utilsStore.getArchives(uid, 'is_pubing', 1, 1, title)
+        const pubingList = await utilsStore.getArchives(uid, 'is_pubing', 1, 3, title)
         const pubingMatch = pubingList.find(matchTitle)
         if (pubingMatch) {
             publishedArchives.value = [pubingMatch]
@@ -67,7 +67,7 @@ const fetchPublishedArchives = async (uid: number) => {
         }
 
         // 2. 没有正在发布的匹配稿件，再查已发布稿件的最新一条
-        const pubedList = await utilsStore.getArchives(uid, 'pubed', 1, 1, title)
+        const pubedList = await utilsStore.getArchives(uid, 'pubed', 1, 3, title)
         const pubedMatch = pubedList.find(matchTitle)
         publishedArchives.value = pubedMatch ? [pubedMatch] : []
     } catch (error) {

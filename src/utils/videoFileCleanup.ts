@@ -51,6 +51,29 @@ export const deleteOriginalVideoFile = async (video?: TemplateVideo | null): Pro
 }
 
 /**
+ * 根据后端 submit 返回的已删除文件路径列表，清空对应视频的 original_file_path。
+ * 后端已实际删除源文件，这里只同步前端配置状态，避免残留已删除文件的路径。
+ * @returns 清空的数量
+ */
+export const clearDeletedVideoFilePaths = (
+    videos?: TemplateVideo[] | null,
+    deletedPaths?: string[] | null
+): number => {
+    if (!videos?.length || !deletedPaths?.length) {
+        return 0
+    }
+    const deletedSet = new Set(deletedPaths)
+    let cleared = 0
+    for (const video of videos) {
+        if (video.original_file_path && deletedSet.has(video.original_file_path)) {
+            video.original_file_path = ''
+            cleared++
+        }
+    }
+    return cleared
+}
+
+/**
  * 批量删除已发布视频的原始本地文件
  * @returns 成功删除的文件数量
  */
