@@ -12,7 +12,8 @@
 - `ai`（AiConfig 对象，2026-09-05 新增，2026-09-07 拆分为两步双模型）：`{ enabled, ffmpeg_path, vision: AiEndpointConfig, writer: AiEndpointConfig }`；`AiEndpointConfig = { base_url, api_key, model, thinking, reasoning_effort }`，两端可指向不同服务商，ffmpeg 共用。默认 base_url=`https://api.openai.com/v1`；`thinking` 默认 true；`reasoning_effort` 默认 `"low"`（DeepSeek 官方取值 low/high/max）。旧扁平字段（ai.base_url 等）由自定义 Deserialize 一次性迁移到两端点。
 
 ## AI 标题生成功能（两步双模型，2026-09-07 重构）
-- 架构：① `ai_analyze_video`（vision 端点：截帧 + 提取对局信息文本，temperature 0.2，返回 `{info, reasoning}`）→ ② `generate_ai_title`（writer 端点：纯文本请求，info 作为 system 上下文，temperature 1.2，返回 `{title, reasoning}`）。均在 `src-tauri/src/commands/ai.rs` 注册于 lib.rs。
+- 架构：① `ai_analyze_video`（vision 端点：截帧 + 提取对局信息文本，temperature 1.0，返回 `{info, reasoning}`）→ ② `generate_ai_title`（writer 端点：纯文本请求，info 作为 system 上下文，temperature 1.2，返回 `{title, reasoning}`）。均在 `src-tauri/src/commands/ai.rs` 注册于 lib.rs。
+- Kimi（moonshot 系）视觉模型要求 temperature 固定为 1，传其它值报参数错误（2026-09-11 已把 ai_analyze_video 的 temperature 从 0.2 改为 1.0）。
 - 底层公共 `request_chat<F: FnMut(&str)>(endpoint, messages, temperature, on_reasoning)` 按 endpoint.thinking 自动走 SSE 流式/一次性；**async 命令内回调不可用 `&mut dyn FnMut`（future 非 Send），须用泛型闭包 F: FnMut**。
 - 提示词在前端（`src/stores/utils.ts`）：`AI_VISION_PROMPT`（识别结算画面→每行一条的对局信息文本）、`AI_WRITE_PROMPT`（基于给定信息创作含英雄名的标题）；`AI_TITLE_PROMPT` 保留为 writer 别名。**改提示词只改前端常量，无需重编 Rust**。Rust 侧 prompt 为空会返回明确错误。
 - 前端 store 方法：`utilsStore.analyzeVideo(videoPath, prompt?)`、`utilsStore.generateAiTitle(info, prompt?, onReasoning?)`。

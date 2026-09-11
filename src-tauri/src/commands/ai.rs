@@ -95,9 +95,10 @@ pub async fn ai_analyze_video(
         frame_bytes.len()
     );
 
-    // 3. 调用「图像识别」端点（视觉请求）。识别属信息抽取任务，temperature 取低值保证稳定
+    // 3. 调用「图像识别」端点（视觉请求）。Kimi 等接口要求 temperature 固定为 1，
+    //    传其它值会报参数错误（如 "temperature must be 1"）
     let messages = build_vision_messages(&data_url, &prompt);
-    let (content, reasoning) = request_chat(&ai.vision, messages, 0.2, |_| {}).await?;
+    let (content, reasoning) = request_chat(&ai.vision, messages, 1.0, |_| {}).await?;
 
     let info_text = content.trim().to_string();
     if info_text.is_empty() {
