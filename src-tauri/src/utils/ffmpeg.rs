@@ -369,6 +369,12 @@ async fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // 打包后主进程是 Windows GUI 子系统（无控制台），直接 spawn 控制台程序
+    // （ffmpeg/ffprobe）会被系统分配一个新控制台，导致执行时闪现命令行窗口。
+    // CREATE_NO_WINDOW 禁止新建控制台窗口（tokio 1.53 中为 Command 的固有方法）
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+
     let child = cmd
         .spawn()
         .map_err(|e| AppError::Custom(format!("无法启动 {}: {e}", program.display())))?;
@@ -405,6 +411,10 @@ async fn run_process_with_stdin(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // 同上：CREATE_NO_WINDOW 禁止子进程新建控制台窗口，避免闪现命令行窗口
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
 
     let mut child = cmd
         .spawn()

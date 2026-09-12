@@ -38,3 +38,5 @@
 - 提交兼容性：`submit` → `into_bilibili_form` 用 `json!(videos)` 序列化后反序列化为 biliup 的 `Studio`，未知字段会被忽略，因此 `extra` 不会真正提交给 B 站。
 - dialog 权限（`dialog:default`、`dialog:allow-open`）已配置在 capabilities/default.json。
 - 构建检查：前端 `npx vue-tsc --noEmit`；Rust `cargo check`。
+- **Windows 弹窗约定（2026-09-12）**：打包后的主进程无控制台，任何外部控制台程序（ffmpeg/ffprobe 等）用 Command spawn 前必须加 `cmd.creation_flags(0x0800_0000)`（CREATE_NO_WINDOW），否则执行时会闪现命令行窗口。当前在 `utils/ffmpeg.rs` 的 `run_process` / `run_process_with_stdin` 已加。
+- tokio 1.53.1：`tokio::process::Command::creation_flags` 是固有方法（直接调用，无需 trait）；`tokio::process::CommandExt` trait 是 private（不可 use）；`tokio::process::Child::from_std` 已移除。
