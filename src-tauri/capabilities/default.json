@@ -82,6 +82,7 @@
           "url": "https://*"
         }
       ]
-    }
+    },
+    "opener:allow-open-path"
   ]
 }

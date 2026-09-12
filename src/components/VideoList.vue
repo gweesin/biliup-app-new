@@ -235,6 +235,13 @@
                                     <span class="video-file-path-text">{{
                                         getVideoLocalPath(video)
                                     }}</span>
+                                    <el-icon
+                                        class="video-file-path-preview"
+                                        title="预览视频"
+                                        @click.stop.prevent="previewVideo(video)"
+                                    >
+                                        <video-play />
+                                    </el-icon>
                                 </div>
                             </div>
 
@@ -373,8 +380,10 @@ import {
     FolderOpened,
     CircleClose,
     VideoPause,
+    VideoPlay,
     CopyDocument
 } from '@element-plus/icons-vue'
+import { openPath } from '@tauri-apps/plugin-opener'
 import { useUploadStore } from '../stores/upload'
 import { useUserConfigStore, createEmptyTitleAffix } from '../stores/user_config'
 import type { TitleAffix } from '../stores/user_config'
@@ -963,6 +972,19 @@ const copyVideoPath = async (video: any) => {
         utilsStore.showMessage('视频路径已复制', 'success')
     } catch {
         utilsStore.showMessage('复制失败，请手动复制路径', 'warning')
+    }
+}
+
+// 用系统默认播放器预览当前视频
+const previewVideo = async (video: any) => {
+    const path = getVideoLocalPath(video)
+    if (!path) {
+        return
+    }
+    try {
+        await openPath(path)
+    } catch {
+        utilsStore.showMessage('无法打开视频，请确认本地文件仍存在', 'warning')
     }
 }
 
@@ -1820,6 +1842,21 @@ const handleSubmitVideos = (mode: 'single' | 'multi', options?: { auto?: boolean
 .video-file-path-copy {
     flex-shrink: 0;
     font-size: 11px;
+}
+
+/* 路径末尾的预览视频按钮 */
+.video-file-path-preview {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: #909399;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: all 0.2s ease;
+}
+
+.video-file-path-preview:hover {
+    color: #409eff;
+    background: rgba(64, 158, 255, 0.12);
 }
 
 .video-file-path:hover {
